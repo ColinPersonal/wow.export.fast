@@ -355,49 +355,25 @@ class GLTFWriter {
 					var requiredBufferSize = 0;
 					for (const bone of this.bones) {
 						// Timestamps are all floats (uints originally), so 4 bytes each.
-						for (let i = 0; i < bone.translation.timestamps.length; i++) {
-							if (i == animationIndex && bone.translation.interpolation < 2) {
-								requiredBufferSize += bone.translation.timestamps[i].length * 4;
-								break;
-							}
-						}
+						if (animationIndex < bone.translation.timestamps.length && bone.translation.interpolation < 2)
+							requiredBufferSize += bone.translation.timestamps[animationIndex].length * 4;
 
-						for (let i = 0; i < bone.rotation.timestamps.length; i++) {
-							if (i == animationIndex && bone.rotation.interpolation < 2) {
-								requiredBufferSize += bone.rotation.timestamps[i].length * 4;
-								break;
-							}
-						}
+						if (animationIndex < bone.rotation.timestamps.length && bone.rotation.interpolation < 2)
+							requiredBufferSize += bone.rotation.timestamps[animationIndex].length * 4;
 
-						for (let i = 0; i < bone.scale.timestamps.length; i++) {
-							if (i == animationIndex && bone.scale.interpolation < 2) {
-								requiredBufferSize += bone.scale.timestamps[i].length * 4;
-								break;
-							}
-						}
+						if (animationIndex < bone.scale.timestamps.length && bone.scale.interpolation < 2)
+							requiredBufferSize += bone.scale.timestamps[animationIndex].length * 4;
 
 						// Vector3 values
-						for (let i = 0; i < bone.translation.values.length; i++) {
-							if (i == animationIndex && bone.translation.interpolation < 2) {
-								requiredBufferSize += bone.translation.values[i].length * 3 * 4;
-								break;
-							}
-						}
+						if (animationIndex < bone.translation.values.length && bone.translation.interpolation < 2)
+							requiredBufferSize += bone.translation.values[animationIndex].length * 3 * 4;
 
-						for (let i = 0; i < bone.scale.values.length; i++) {
-							if (i == animationIndex && bone.scale.interpolation < 2) {
-								requiredBufferSize += bone.scale.values[i].length * 3 * 4;
-								break;
-							}
-						}
+						if (animationIndex < bone.scale.values.length && bone.scale.interpolation < 2)
+							requiredBufferSize += bone.scale.values[animationIndex].length * 3 * 4;
 
 						// Quaternion values
-						for (let i = 0; i < bone.rotation.values.length; i++) {
-							if (i == animationIndex && bone.rotation.interpolation < 2) {
-								requiredBufferSize += bone.rotation.values[i].length * 4 * 4;
-								break;
-							}
-						}
+						if (animationIndex < bone.rotation.values.length && bone.rotation.interpolation < 2)
+							requiredBufferSize += bone.rotation.values[animationIndex].length * 4 * 4;
 					}
 
 					if (requiredBufferSize > 0) {

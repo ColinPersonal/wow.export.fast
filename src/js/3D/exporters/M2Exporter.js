@@ -21,6 +21,7 @@ const GeosetMapper = require('../GeosetMapper');
 const ExportHelper = require('../../casc/export-helper');
 const BufferWrapper = require('../../buffer');
 const exportSession = require('../../export-session');
+const animFileCache = require('../anim-file-cache');
 
 /**
  * Copy a file from CASC to disk without conversion. Each destination is only
@@ -277,6 +278,9 @@ class M2Exporter {
 
 		const model_name = path.basename(outGLTF, ext);
 		const gltf = new GLTFWriter(out, model_name);
+
+		// Optional user filter limiting which animations are loaded and exported.
+		const animFilter = core.view.config.modelsExportAnimations ? animFileCache.getAnimationFilter() : null;
 		log.write('Exporting M2 model %s as %s: %s', model_name, format.toUpperCase(), outGLTF);
 
 		if (this.m2.skeletonFileID) {
@@ -293,8 +297,7 @@ class M2Exporter {
 				if (core.view.config.modelsExportAnimations) {
 					// load each skeleton's .anim files independently
 					// each skeleton's bone offsets match its own .anim data
-					await parent_skel.loadAnims();
-					await skel.loadAnims();
+					await Promise.all([parent_skel.loadAnims(true, animFilter), skel.loadAnims(true, animFilter)]);
 
 					// identify which animations come from the child skeleton
 					const child_anim_keys = new Set();
@@ -338,26 +341,34 @@ class M2Exporter {
 						}
 					}
 
-					gltf.setAnimations(parent_skel.animations);
+					const filtered = animFileCache.applyAnimationFilter(parent_skel.animations, parent_skel.bones, animFilter);
+					gltf.setAnimations(filtered.animations);
+					gltf.setBonesArray(filtered.bones);
+				} else {
+					gltf.setBonesArray(parent_skel.bones);
 				}
-
-				gltf.setBonesArray(parent_skel.bones);
 			} else {
 				if (core.view.config.modelsExportAnimations) {
-					await skel.loadAnims();
-					gltf.setAnimations(skel.animations);
-				}
+					await skel.loadAnims(true, animFilter);
 
-				gltf.setBonesArray(skel.bones);
+					const filtered = animFileCache.applyAnimationFilter(skel.animations, skel.bones, animFilter);
+					gltf.setAnimations(filtered.animations);
+					gltf.setBonesArray(filtered.bones);
+				} else {
+					gltf.setBonesArray(skel.bones);
+				}
 			}
 
 		} else {
 			if (core.view.config.modelsExportAnimations) {
-				await this.m2.loadAnims();
-				gltf.setAnimations(this.m2.animations);
-			}
+				await this.m2.loadAnims(true, animFilter);
 
-			gltf.setBonesArray(this.m2.bones);
+				const filtered = animFileCache.applyAnimationFilter(this.m2.animations, this.m2.bones, animFilter);
+				gltf.setAnimations(filtered.animations);
+				gltf.setBonesArray(filtered.bones);
+			} else {
+				gltf.setBonesArray(this.m2.bones);
+			}
 		}
 
 		gltf.setVerticesArray(this.m2.vertices);
@@ -1064,7 +1075,6 @@ class M2Exporter {
 			await skel.load();
 
 			if (config.modelsExportAnim) {
-				await skel.loadAnims();
 				if (config.modelsExportAnim && skel.animFileIDs) {
 					const animManifest = [];
 					const animCache = new Set();
@@ -1128,7 +1138,6 @@ class M2Exporter {
 				await parentSkel.load();
 
 				if (config.modelsExportAnim) {
-					await parentSkel.loadAnims();
 					if (config.modelsExportAnim && parentSkel.animFileIDs) {
 						const animManifest = [];
 						const animCache = new Set();

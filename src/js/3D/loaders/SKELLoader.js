@@ -16,6 +16,7 @@ const BufferWrapper = require('../../buffer');
 const AnimMapper = require('../AnimMapper');
 const log = require('../../log');
 const ANIMLoader = require('./ANIMLoader');
+const animFileCache = require('../anim-file-cache');
 const core = require('../../core');
 
 // See: https://wowdev.wiki/M2/.skel
@@ -404,12 +405,43 @@ class SKELLoader {
 		}
 	}
 
-	async loadAnims(load_all = true) {
+	async loadAnims(load_all = true, filter = null) {
 		if (!load_all)
 			return;
 
+		// Start reading every .anim file we are going to need up-front so they load
+		// concurrently; the loop below then applies them in order as they arrive.
+		if (this.animFileIDs) {
+			const wanted = new Set();
+			for (let i = 0; i < this.animations.length; i++) {
+				if (this.animFiles.has(i) || (filter !== null && !filter.has(this.animations[i].id)))
+					continue;
+
+				let animation = this.animations[i];
+				while ((animation.flags & 0x40) === 0x40)
+					animation = this.animations[animation.aliasNext];
+
+				if ((animation.flags & 0x20) === 0x20)
+					continue;
+
+				for (const entry of this.animFileIDs) {
+					if (entry.animID === animation.id && entry.subAnimID === animation.variationIndex && entry.fileDataID > 0) {
+						wanted.add(entry.fileDataID);
+						break;
+					}
+				}
+			}
+
+			log.write('Loading %d .anim files...', wanted.size);
+			animFileCache.prefetch(wanted);
+		}
+
 		for (let i = 0; i < this.animations.length; i++) {
 			let animation = this.animations[i];
+
+			// animations excluded by the export filter are not loaded at all
+			if (filter !== null && !filter.has(animation.id))
+				continue;
 
 			// if animation is an alias, resolve it
 			if ((animation.flags & 0x40) === 0x40) {
@@ -433,9 +465,7 @@ class SKELLoader {
 						continue;
 					}
 
-					log.write('Loading .anim file for animation: ' + entry.animID + ' (' + AnimMapper.get_anim_name(entry.animID) + ') - ' + entry.subAnimID);
-
-					const loader = new ANIMLoader(await core.view.casc.getFile(fileDataID));
+					const loader = new ANIMLoader(await animFileCache.get(fileDataID));
 					await loader.load(true);
 
 					if (loader.skeletonBoneData !== undefined)
