@@ -5,6 +5,7 @@
  */
 const BufferWrapper = require('../buffer');
 const PNGWriter = require('../png-writer');
+const perf = require('../perf');
 const webp = require('webp-wasm');
 
 const DXT1 = 0x1;
@@ -123,6 +124,17 @@ class BLPImage {
 	 * @returns {BufferWrapper}
 	 */
 	toPNG(mask = 0b1111, mipmap = 0) {
+		return this._toPNGWriter(mask, mipmap).getBuffer();
+	}
+
+	/**
+	 * Decode this BLP into a PNGWriter ready for encoding.
+	 * @param {number} mask
+	 * @param {number} mipmap
+	 * @returns {PNGWriter}
+	 */
+	_toPNGWriter(mask = 0b1111, mipmap = 0) {
+		const start = perf.now();
 		this._prepare(mipmap);
 
 		const png = new PNGWriter(this.scaledWidth, this.scaledHeight);
@@ -134,7 +146,8 @@ class BLPImage {
 			case 3: this._marshalBGRA(pixelData, mask); break;
 		}
 
-		return png.getBuffer();
+		perf.add('blp.decode', perf.now() - start);
+		return png;
 	}
 
 	/**
@@ -144,7 +157,8 @@ class BLPImage {
 	 * @param {number} mipmap
 	 */
 	async saveToPNG(file, mask = 0b1111, mipmap = 0) {
-		return await this.toPNG(mask, mipmap).writeToFile(file);
+		// Encoding is handed to a worker thread when one is available.
+		return await this._toPNGWriter(mask, mipmap).write(file);
 	}
 
 	/**

@@ -10,6 +10,8 @@ const log = require('../log');
 const generics = require('../generics');
 const perf = require('../perf');
 const exportSession = require('../export-session');
+const workerPool = require('../worker-pool');
+const PNGWriter = require('../png-writer');
 
 const TOAST_OPT_LOG = { 'View Log': () => log.openRuntimeLog() };
 //const TOAST_OPT_DIR = { 'Open Export Directory': () => core.openExportDirectory() };
@@ -186,6 +188,8 @@ class ExportHelper {
 		// Each export run gets a fresh de-duplication session and profile.
 		exportSession.reset();
 		exportSession.setIOLimit(ExportHelper.getConcurrency() * 2);
+		workerPool.setEnabled(core.view.config.exportWorkers !== false);
+		PNGWriter.fastMode = core.view.config.exportFastPNG !== false;
 		perf.reset();
 
 		log.write('Starting export of %d %s items', this.count, this.unit);

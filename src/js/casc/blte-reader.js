@@ -150,6 +150,25 @@ class BLTEReader extends BufferWrapper {
 	}
 
 	/**
+	 * Construct a reader from data that has already been verified and decoded
+	 * (e.g. on a worker thread). No further block processing takes place.
+	 * @param {Buffer} decoded
+	 * @returns {BLTEReader}
+	 */
+	static fromDecoded(decoded) {
+		const reader = Object.create(BLTEReader.prototype);
+		reader._ofs = 0;
+		reader._buf = decoded;
+		reader._blte = null;
+		reader.blocks = [];
+		reader.blockIndex = 0;
+		reader.blockWriteIndex = decoded.byteLength;
+		reader.partialDecrypt = false;
+
+		return reader;
+	}
+
+	/**
 	 * Process all BLTE blocks in the reader.
 	 */
 	processAllBlocks() {

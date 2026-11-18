@@ -20,6 +20,10 @@ const core = require('../core');
 const generics = require('../generics');
 const perf = require('../perf');
 const exportSession = require('../export-session');
+const workerPool = require('../worker-pool');
+
+// Files at least this large are verified and decompressed on a worker thread.
+const BLTE_WORKER_MIN_SIZE = 32 * 1024;
 const CASCRemote = require('./casc-source-remote');
 const cdnResolver = require('./cdn-resolver');
 
@@ -68,7 +72,25 @@ class CASCLocal extends CASC {
 			log.write('Loading local CASC file %d (%s)', fileDataID, listfile.getByID(fileDataID));
 
 		const encodingKey = contentKey !== null ? super.getEncodingKeyForContentKey(contentKey) : await super.getFile(fileDataID);
-		const data = supportFallback ? await this.getDataFileWithRemoteFallback(encodingKey, forceFallback) : await this.getDataFile(encodingKey);
+		let data = supportFallback ? await this.getDataFileWithRemoteFallback(encodingKey, forceFallback) : await this.getDataFile(encodingKey);
+
+		if (data.byteLength >= BLTE_WORKER_MIN_SIZE && workerPool.isAvailable()) {
+			const decodeStart = perf.now();
+			try {
+				const result = await workerPool.decodeBLTE(data.raw, encodingKey);
+				if (result.decoded !== null) {
+					perf.add('casc.decode (worker)', perf.now() - decodeStart, result.decoded.byteLength);
+					return BLTEReader.fromDecoded(result.decoded);
+				}
+
+				// The worker declined (encrypted blocks, failed verification); decode here.
+				data = new BufferWrapper(result.raw);
+			} catch (e) {
+				// The buffer may have been handed to a worker that failed, so read it again.
+				data = supportFallback ? await this.getDataFileWithRemoteFallback(encodingKey, forceFallback) : await this.getDataFile(encodingKey);
+			}
+		}
+
 		return new BLTEReader(data, encodingKey, partialDecryption);
 	}
 
