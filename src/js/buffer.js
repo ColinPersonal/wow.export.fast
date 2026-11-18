@@ -10,6 +10,10 @@ const path = require('path');
 const crc32 = require('./crc32');
 const fsp = require('fs').promises;
 const webp = require('webp-wasm');
+const perf = require('./perf');
+
+// Directories known to exist, so we don't issue a recursive mkdir for every file written.
+const knownDirectories = new Set();
 
 const LITTLE_ENDIAN = {
 	READ_INT: Buffer.prototype.readIntLE,
@@ -933,8 +937,26 @@ class BufferWrapper {
 	 * @param {string} file 
 	 */
 	async writeToFile(file) {
-		await fsp.mkdir(path.dirname(file), { recursive: true });
-		await fsp.writeFile(file, this._buf);
+		const start = perf.now();
+		const dir = path.dirname(file);
+
+		if (!knownDirectories.has(dir)) {
+			await fsp.mkdir(dir, { recursive: true });
+			knownDirectories.add(dir);
+		}
+
+		try {
+			await fsp.writeFile(file, this._buf);
+		} catch (e) {
+			// The directory may have been removed since we last saw it.
+			if (e.code !== 'ENOENT')
+				throw e;
+
+			await fsp.mkdir(dir, { recursive: true });
+			await fsp.writeFile(file, this._buf);
+		}
+
+		perf.add('fs.write', perf.now() - start, this._buf.byteLength);
 	}
 
 	/**
@@ -1125,4 +1147,4 @@ class BufferWrapper {
 	}
 }
 
-module.exports = BufferWrapper;
+module.exports = BufferWrapper;

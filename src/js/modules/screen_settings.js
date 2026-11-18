@@ -191,9 +191,37 @@ module.exports = {
 				</label>
 			</div>
 			<div>
+				<h1>Export Concurrency</h1>
+				<p>How many files are read, converted and written at the same time during an export. Range is 1-32.</p>
+				<p>Higher values are faster on SSDs with several CPU cores. Lower this if exports make your system unresponsive.</p>
+				<input type="number" min="1" max="32" v-model.number="$core.view.configEdit.exportConcurrency"/>
+			</div>
+			<div>
+				<h1>Fast PNG Encoding</h1>
+				<p>Encodes PNG files several times faster at the cost of files that are roughly 10-15% larger. Image quality is identical.</p>
+				<label class="ui-checkbox">
+					<input type="checkbox" v-model="$core.view.configEdit.exportFastPNG"/>
+					<span>Enable</span>
+				</label>
+			</div>
+			<div>
+				<h1>Use Worker Threads</h1>
+				<p>Decompress game files and encode PNG files on background threads, keeping the application responsive and making use of additional CPU cores.</p>
+				<label class="ui-checkbox">
+					<input type="checkbox" v-model="$core.view.configEdit.exportWorkers"/>
+					<span>Enable</span>
+				</label>
+			</div>
+			<div>
+				<h1>Animation Export Filter</h1>
+				<p>When exporting models with animations (glTF/GLB), only include these animation IDs. Separate IDs with commas (e.g. "0, 4, 5"). Leave empty to export every animation.</p>
+				<input type="text" class="long" v-model.trim="$core.view.configEdit.modelsExportAnimationFilter"/>
+			</div>
+			<div>
 				<h1>Always Overwrite Existing Files (Recommended)</h1>
 				<p>When exporting, files will always be written to disk even if they exist.</p>
 				<p>Disabling this can speed up exporting, but may lead to issues between versions.</p>
+				<p>When disabled, raw map exports skip tiles completed by a previous export, allowing an interrupted export to be resumed.</p>
 				<label class="ui-checkbox">
 					<input type="checkbox" v-model="$core.view.configEdit.overwriteFiles"/>
 					<span>Enable</span>

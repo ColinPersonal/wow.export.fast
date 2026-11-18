@@ -381,6 +381,55 @@ const readFile = async (file, offset, length) => {
 	return buf;
 };
 
+const SHARED_HANDLE_IDLE_MS = 10000;
+const sharedHandles = new Map();
+
+/**
+ * Read a portion of a file using a shared, cached file handle.
+ * Intended for hot paths that read many ranges from a small set of large
+ * files (e.g. CASC data archives), where opening and closing a handle per read
+ * is wasteful. Handles are closed after a period of inactivity.
+ * @param {string} file
+ * @param {number} offset
+ * @param {number} length
+ */
+const readFileShared = async (file, offset, length) => {
+	let entry = sharedHandles.get(file);
+	if (entry === undefined) {
+		entry = { promise: fsp.open(file), active: 0, timer: null };
+		sharedHandles.set(file, entry);
+	}
+
+	entry.active++;
+	clearTimeout(entry.timer);
+
+	try {
+		const fd = await entry.promise;
+		const buf = BufferWrapper.alloc(length);
+
+		await fd.read(buf.raw, 0, length, offset);
+		return buf;
+	} catch (e) {
+		// Don't keep a handle that failed to open or read.
+		if (sharedHandles.get(file) === entry)
+			sharedHandles.delete(file);
+
+		entry.promise.then(fd => fd.close()).catch(() => {});
+		throw e;
+	} finally {
+		if (--entry.active === 0 && sharedHandles.get(file) === entry) {
+			entry.timer = setTimeout(() => {
+				if (entry.active === 0 && sharedHandles.get(file) === entry) {
+					sharedHandles.delete(file);
+					entry.promise.then(fd => fd.close()).catch(() => {});
+				}
+			}, SHARED_HANDLE_IDLE_MS);
+
+			entry.timer.unref?.();
+		}
+	}
+};
+
 /**
  * Recursively delete a directory and everything inside of it.
  * Returns the total size of all files deleted.
@@ -499,6 +548,7 @@ module.exports = {
 	fileExists,
 	directoryIsWritable,
 	readFile,
+	readFileShared,
 	deleteDirectory,
 	formatPlaybackSeconds,
 	batchWork

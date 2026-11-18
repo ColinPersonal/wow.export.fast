@@ -18,6 +18,8 @@ const BLTEStreamReader = require('./blte-stream-reader');
 const listfile = require('./listfile');
 const core = require('../core');
 const generics = require('../generics');
+const perf = require('../perf');
+const exportSession = require('../export-session');
 const CASCRemote = require('./casc-source-remote');
 const cdnResolver = require('./cdn-resolver');
 
@@ -61,7 +63,8 @@ class CASCLocal extends CASC {
 	 * @param {string} [contentKey=null]
 	 */
 	async getFile(fileDataID, partialDecryption = false, suppressLog = false, supportFallback = true, forceFallback = false, contentKey = null) {
-		if (!suppressLog)
+		// Per-file logging is skipped during exports, where it is pure overhead.
+		if (!suppressLog && !exportSession.isActive())
 			log.write('Loading local CASC file %d (%s)', fileDataID, listfile.getByID(fileDataID));
 
 		const encodingKey = contentKey !== null ? super.getEncodingKeyForContentKey(contentKey) : await super.getFile(fileDataID);
@@ -388,7 +391,9 @@ class CASCLocal extends CASC {
 		if (!entry)
 			throw new Error('Requested file does not exist in local data: ' + key);
 
-		const data = await generics.readFile(this.formatDataPath(entry.index), entry.offset + 0x1E, entry.size - 0x1E);
+		const readStart = perf.now();
+		const data = await generics.readFileShared(this.formatDataPath(entry.index), entry.offset + 0x1E, entry.size - 0x1E);
+		perf.add('casc.read', perf.now() - readStart, entry.size - 0x1E);
 
 		let isZeroed = true;
 		for (let i = 0, n = data.remainingBytes; i < n; i++) {

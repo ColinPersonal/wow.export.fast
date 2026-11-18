@@ -22,6 +22,10 @@ const M2Exporter = require('./M2Exporter');
 const M3Exporter = require('./M3Exporter');
 const constants = require('../../constants');
 const WMOShaderMapper = require('../WMOShaderMapper');
+const exportSession = require('../../export-session');
+
+// Loaded lazily: shared-model-export depends on the model exporters.
+const exportPlacedModel = (...args) => require('./shared-model-export').exportPlacedModel(...args);
 
 const doodadCache = new Set();
 
@@ -163,7 +167,8 @@ class WMOExporter {
 						texFile = path.relative(path.dirname(out), texPath);
 					}
 
-					const file_existed = await generics.fileExists(texPath);
+					// Only hit the disk for an existence check when the result matters.
+					const file_existed = (glbMode || !config.overwriteFiles) ? await generics.fileExists(texPath) : false;
 
 					if (glbMode && !raw) {
 						// glb mode: convert to PNG buffer without writing
@@ -176,15 +181,18 @@ class WMOExporter {
 						if (!file_existed)
 							files_to_cleanup.push(texPath);
 					} else if (config.overwriteFiles || !file_existed) {
-						const data = await casc.getFile(fileDataID);
+						// Shared textures are written once per export run, not once per model.
+						await exportSession.once('tex:' + texPath + ':' + (raw ? 'raw' : useAlpha), async () => {
+							const data = await casc.getFile(fileDataID);
 
-						log.write('Exporting WMO texture %d -> %s', fileDataID, texPath);
-						if (raw) {
-							await data.writeToFile(texPath);
-						} else {
-							const blp = new BLPFile(data);
-							await blp.saveToPNG(texPath, useAlpha ? 0b1111 : 0b0111);
-						}
+							log.write('Exporting WMO texture %d -> %s', fileDataID, texPath);
+							if (raw) {
+								await data.writeToFile(texPath);
+							} else {
+								const blp = new BLPFile(data);
+								await blp.saveToPNG(texPath, useAlpha ? 0b1111 : 0b0111);
+							}
+						});
 					} else {
 						log.write('Skipping WMO texture export %s (file exists, overwrite disabled)', texPath);
 					}
@@ -581,16 +589,7 @@ class WMOExporter {
 
 							// Only export doodads that are not already exported.
 							if (!doodadCache.has(fileDataID)) {
-								const data = await casc.getFile(fileDataID);
-								const modelMagic = data.readUInt32LE();
-								data.seek(0);
-								if (modelMagic == constants.MAGIC.MD21) {
-									const m2Export = new M2Exporter(data, undefined, fileDataID);
-									await m2Export.exportAsOBJ(m2Path, core.view.config.modelsExportCollision, helper);
-								} else if (modelMagic == constants.MAGIC.M3DT) {
-									const m3Export = new M3Exporter(data, undefined, fileDataID);
-									await m3Export.exportAsOBJ(m2Path, core.view.config.modelsExportCollision, helper);
-								}
+								await exportPlacedModel(fileDataID, m2Path, false, helper);
 								
 								// Abort if the export has been cancelled.
 								if (helper.isCancelled())
@@ -1053,16 +1052,7 @@ class WMOExporter {
 								m2Path = ExportHelper.replaceFile(out, fileName);
 
 							if (!doodadCache.has(fileDataID)) {
-								const data = await casc.getFile(fileDataID);
-								const modelMagic = data.readUInt32LE();
-								data.seek(0);
-								if (modelMagic == constants.MAGIC.MD21) {
-									const m2Export = new M2Exporter(data, undefined, fileDataID);
-									await m2Export.exportAsOBJ(m2Path, config.modelsExportCollision, helper);
-								} else if (modelMagic == constants.MAGIC.M3DT) {
-									const m3Export = new M3Exporter(data, undefined, fileDataID);
-									await m3Export.exportAsOBJ(m2Path, config.modelsExportCollision, helper);
-								}
+								await exportPlacedModel(fileDataID, m2Path, false, helper);
 
 								if (helper.isCancelled())
 									return;
@@ -1246,6 +1236,9 @@ class WMOExporter {
 
 		manifest.addProperty('textures', texturesManifest);
 
+		// Group files are copied concurrently.
+		const rawCopies = [];
+
 		if (config.modelsExportWMOGroups) {
 			const groupManifest = [];
 			const wmoFileName = this.wmo.fileName;
@@ -1271,15 +1264,13 @@ class WMOExporter {
 					if (groupFileDataID === 0)
 						continue;
 
-					const groupData = await casc.getFile(groupFileDataID);
-					
 					let groupFile;
 					if (config.enableSharedChildren)
 						groupFile = ExportHelper.getExportPath(groupName);
 					else
 						groupFile = path.join(path.dirname(out), path.basename(groupName));
 	
-					await groupData.writeToFile(groupFile);
+					rawCopies.push(ExportHelper.copyRawFile(groupFileDataID, groupFile));
 	
 					fileManifest?.push({ type: 'WMO_GROUP', fileDataID: groupFileDataID, file: groupFile });
 					groupManifest.push({ fileDataID: groupFileDataID, file: path.relative(out, groupFile) });
@@ -1287,6 +1278,7 @@ class WMOExporter {
 			}
 
 			manifest.addProperty('groups', groupManifest);
+			await Promise.all(rawCopies);
 		}
 
 		// Doodad sets.
@@ -1336,16 +1328,7 @@ class WMOExporter {
 						// Only export doodads that are not already exported.
 						if (!doodadCache.has(fileDataID)) {
 							
-							const data = await casc.getFile(fileDataID);
-							const modelMagic = data.readUInt32LE();
-							data.seek(0);
-							if (modelMagic == constants.MAGIC.MD21) {
-								const m2Export = new M2Exporter(data, undefined, fileDataID);
-								await m2Export.exportRaw(m2Path, helper);
-							} else if (modelMagic == constants.MAGIC.M3DT) {
-								const m3Export = new M3Exporter(data, undefined, fileDataID);
-								await m3Export.exportRaw(m2Path, helper);
-							}
+							await exportPlacedModel(fileDataID, m2Path, true, helper);
 
 							// Abort if the export has been cancelled.
 							if (helper.isCancelled())

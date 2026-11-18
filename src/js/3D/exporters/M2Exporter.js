@@ -20,6 +20,15 @@ const GLTFWriter = require('../writers/GLTFWriter');
 const GeosetMapper = require('../GeosetMapper');
 const ExportHelper = require('../../casc/export-helper');
 const BufferWrapper = require('../../buffer');
+const exportSession = require('../../export-session');
+
+/**
+ * Copy a file from CASC to disk without conversion. Each destination is only
+ * written once per export run, and copies are throttled by the shared I/O limiter.
+ * @param {number} fileDataID
+ * @param {string} outFile
+ */
+const copyRawFile = (fileDataID, outFile) => ExportHelper.copyRawFile(fileDataID, outFile);
 
 class M2Exporter {
 	/**
@@ -199,7 +208,8 @@ class M2Exporter {
 						texFile = path.relative(out, texPath);
 					}
 
-					const file_existed = await generics.fileExists(texPath);
+					// Only hit the disk for an existence check when the result matters.
+					const file_existed = (glbMode || !config.overwriteFiles) ? await generics.fileExists(texPath) : false;
 
 					if (glbMode && !raw) {
 						// glb mode: convert to PNG buffer without writing
@@ -212,17 +222,20 @@ class M2Exporter {
 						if (!file_existed)
 							files_to_cleanup.push(texPath);
 					} else if (config.overwriteFiles || !file_existed) {
-						const data = await core.view.casc.getFile(texFileDataID);
-						log.write('Exporting M2 texture %d -> %s', texFileDataID, texPath);
+						// Shared textures are written once per export run, not once per model.
+						await exportSession.once('tex:' + texPath + ':' + (raw ? 'raw' : useAlpha), async () => {
+							const data = await core.view.casc.getFile(texFileDataID);
+							log.write('Exporting M2 texture %d -> %s', texFileDataID, texPath);
 
-						if (raw === true) {
-							// write raw BLP files
-							await data.writeToFile(texPath);
-						} else {
-							// convert BLP to PNG
-							const blp = new BLPFile(data);
-							await blp.saveToPNG(texPath, useAlpha ? 0b1111 : 0b0111);
-						}
+							if (raw === true) {
+								// write raw BLP files
+								await data.writeToFile(texPath);
+							} else {
+								// convert BLP to PNG
+								const blp = new BLPFile(data);
+								await blp.saveToPNG(texPath, useAlpha ? 0b1111 : 0b0111);
+							}
+						});
 					} else {
 						log.write('Skipping M2 texture export %s (file exists, overwrite disabled)', texPath);
 					}
@@ -992,6 +1005,9 @@ class M2Exporter {
 		// Directory that relative files should be exported to.
 		const outDir = path.dirname(out);
 
+		// Related files (skins, bones, animations) are copied concurrently.
+		const rawCopies = [];
+
 		// Write relative skin files.
 		if (config.modelsExportSkin) {
 			const textures = await this.exportTextures(outDir, true, null, helper);
@@ -1010,7 +1026,6 @@ class M2Exporter {
 					if (helper.isCancelled())
 						return;
 	
-					const skinData = await casc.getFile(skin.fileDataID);
 
 					let skinFile;
 					if (config.enableSharedChildren)
@@ -1018,7 +1033,7 @@ class M2Exporter {
 					else
 						skinFile = path.join(outDir, path.basename(skin.fileName));
 	
-					await skinData.writeToFile(skinFile);
+					rawCopies.push(copyRawFile(skin.fileDataID, skinFile));
 					skinsManifest.push({ fileDataID: skin.fileDataID, file: path.relative(outDir, skinFile) });
 					fileManifest?.push({ type: typeName, fileDataID: skin.fileDataID, file: skinFile });
 				}
@@ -1055,7 +1070,6 @@ class M2Exporter {
 					const animCache = new Set();
 					for (const anim of skel.animFileIDs) {
 						if (anim.fileDataID > 0 && !animCache.has(anim.fileDataID)) {
-							const animData = await casc.getFile(anim.fileDataID);
 							const animFileName = listfile.getByIDOrUnknown(anim.fileDataID, '.anim');
 							
 							let animFile;
@@ -1064,7 +1078,7 @@ class M2Exporter {
 							else
 								animFile = path.join(outDir, path.basename(animFileName));
 
-							await animData.writeToFile(animFile);
+							rawCopies.push(copyRawFile(anim.fileDataID, animFile));
 							animManifest.push({ fileDataID: anim.fileDataID, file: path.relative(outDir, animFile), animID: anim.animID, subAnimID: anim.subAnimID });
 							fileManifest?.push({ type: 'ANIM', fileDataID: anim.fileDataID, file: animFile });
 							animCache.add(anim.fileDataID);
@@ -1078,7 +1092,6 @@ class M2Exporter {
 					const boneManifest = [];
 					for (let i = 0, n = skel.boneFileIDs.length; i < n; i++) {
 						const boneFileID = skel.boneFileIDs[i];
-						const boneData = await casc.getFile(boneFileID);
 						const boneFileName = listfile.getByIDOrUnknown(boneFileID, '.bone');
 		
 						let boneFile;
@@ -1087,7 +1100,7 @@ class M2Exporter {
 						else
 							boneFile = path.join(outDir, path.basename(boneFileName));
 		
-						await boneData.writeToFile(boneFile);
+						rawCopies.push(copyRawFile(boneFileID, boneFile));
 						boneManifest.push({ fileDataID: boneFileID, file: path.relative(outDir, boneFile) });
 						fileManifest?.push({ type: 'BONE', fileDataID: boneFileID, file: boneFile });
 					}
@@ -1121,7 +1134,6 @@ class M2Exporter {
 						const animCache = new Set();
 						for (const anim of parentSkel.animFileIDs) {
 							if (anim.fileDataID > 0 && !animCache.has(anim.fileDataID)) {
-								const animData = await casc.getFile(anim.fileDataID);
 								const animFileName = listfile.getByIDOrUnknown(anim.fileDataID, '.anim');
 								
 								let animFile;
@@ -1130,7 +1142,7 @@ class M2Exporter {
 								else
 									animFile = path.join(outDir, path.basename(animFileName));
 	
-								await animData.writeToFile(animFile);
+								rawCopies.push(copyRawFile(anim.fileDataID, animFile));
 								animManifest.push({ fileDataID: anim.fileDataID, file: path.relative(outDir, animFile), animID: anim.animID, subAnimID: anim.subAnimID });
 								fileManifest?.push({ type: 'ANIM', fileDataID: anim.fileDataID, file: animFile });
 								animCache.add(anim.fileDataID);
@@ -1145,7 +1157,6 @@ class M2Exporter {
 					const boneManifest = [];
 					for (let i = 0, n = parentSkel.boneFileIDs.length; i < n; i++) {
 						const boneFileID = parentSkel.boneFileIDs[i];
-						const boneData = await casc.getFile(boneFileID);
 						const boneFileName = listfile.getByIDOrUnknown(boneFileID, '.bone');
 		
 						let boneFile;
@@ -1154,7 +1165,7 @@ class M2Exporter {
 						else
 							boneFile = path.join(outDir, path.basename(boneFileName));
 		
-						await boneData.writeToFile(boneFile);
+						rawCopies.push(copyRawFile(boneFileID, boneFile));
 						boneManifest.push({ fileDataID: boneFileID, file: path.relative(outDir, boneFile) });
 						fileManifest?.push({ type: 'BONE', fileDataID: boneFileID, file: boneFile });
 					}
@@ -1169,7 +1180,6 @@ class M2Exporter {
 			const boneManifest = [];
 			for (let i = 0, n = this.m2.boneFileIDs.length; i < n; i++) {
 				const boneFileID = this.m2.boneFileIDs[i];
-				const boneData = await casc.getFile(boneFileID);
 				const boneFileName = listfile.getByIDOrUnknown(boneFileID, '.bone');
 
 				let boneFile;
@@ -1178,7 +1188,7 @@ class M2Exporter {
 				else
 					boneFile = path.join(outDir, path.basename(boneFileName));
 
-				await boneData.writeToFile(boneFile);
+				rawCopies.push(copyRawFile(boneFileID, boneFile));
 				boneManifest.push({ fileDataID: boneFileID, file: path.relative(outDir, boneFile) });
 				fileManifest?.push({ type: 'BONE', fileDataID: boneFileID, file: boneFile });
 			}
@@ -1192,7 +1202,6 @@ class M2Exporter {
 			const animCache = new Set();
 			for (const anim of this.m2.animFileIDs) {
 				if (anim.fileDataID > 0 && !animCache.has(anim.fileDataID)) {
-					const animData = await casc.getFile(anim.fileDataID);
 					const animFileName = listfile.getByIDOrUnknown(anim.fileDataID, '.anim');
 					
 					let animFile;
@@ -1201,7 +1210,7 @@ class M2Exporter {
 					else
 						animFile = path.join(outDir, path.basename(animFileName));
 
-					await animData.writeToFile(animFile);
+					rawCopies.push(copyRawFile(anim.fileDataID, animFile));
 					animManifest.push({ fileDataID: anim.fileDataID, file: path.relative(outDir, animFile), animID: anim.animID, subAnimID: anim.subAnimID });
 					fileManifest?.push({ type: 'ANIM', fileDataID: anim.fileDataID, file: animFile });
 					animCache.add(anim.fileDataID);
@@ -1210,6 +1219,9 @@ class M2Exporter {
 
 			manifest.addProperty('anims', animManifest);
 		}
+
+		// Wait for the related files queued above to finish copying.
+		await Promise.all(rawCopies);
 
 		await manifest.write();
 	}

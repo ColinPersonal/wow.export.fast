@@ -8,6 +8,8 @@ const util = require('util');
 const core = require('../core');
 const log = require('../log');
 const generics = require('../generics');
+const perf = require('../perf');
+const exportSession = require('../export-session');
 
 const TOAST_OPT_LOG = { 'View Log': () => log.openRuntimeLog() };
 //const TOAST_OPT_DIR = { 'Open Export Directory': () => core.openExportDirectory() };
@@ -18,6 +20,34 @@ const TOAST_OPT_LOG = { 'View Log': () => log.openRuntimeLog() };
  * @class ExportHelper
  */
 class ExportHelper {
+	/**
+	 * How many export tasks (file reads/conversions/writes) may run at once.
+	 * @returns {number}
+	 */
+	static getConcurrency() {
+		const value = Number(core.view.config.exportConcurrency);
+		if (!Number.isFinite(value) || value < 1)
+			return 8;
+
+		return Math.min(32, Math.floor(value));
+	}
+
+	/**
+	 * Copy a file from CASC to disk without conversion. Each destination is only
+	 * written once per export run, and copies are throttled by the shared I/O limiter.
+	 * @param {number} fileDataID
+	 * @param {string} outFile
+	 */
+	static copyRawFile(fileDataID, outFile) {
+		return exportSession.once('raw:' + outFile, () => exportSession.io(async () => {
+			if (!core.view.config.overwriteFiles && await generics.fileExists(outFile))
+				return;
+
+			const data = await core.view.casc.getFile(fileDataID);
+			await data.writeToFile(outFile);
+		}));
+	}
+
 	/**
 	 * Return an export path for the given file.
 	 * @param {string} file 
@@ -153,6 +183,11 @@ class ExportHelper {
 		core.view.isBusy++;
 		core.view.exportCancelled = false;
 
+		// Each export run gets a fresh de-duplication session and profile.
+		exportSession.reset();
+		exportSession.setIOLimit(ExportHelper.getConcurrency() * 2);
+		perf.reset();
+
 		log.write('Starting export of %d %s items', this.count, this.unit);
 		this.updateCurrentTask();
 
@@ -188,6 +223,13 @@ class ExportHelper {
 			return;
 		
 		log.write('Finished export (%d succeeded, %d failed)', this.succeeded, this.failed);
+
+		exportSession.end();
+		const profile = perf.end();
+		if (profile !== null) {
+			for (const line of profile)
+				log.write(line);
+		}
 
 		if (this.succeeded === this.count) {
 			// Everything succeeded.
@@ -291,4 +333,4 @@ class ExportHelper {
 	}
 }
 
-module.exports = ExportHelper;
+module.exports = ExportHelper;

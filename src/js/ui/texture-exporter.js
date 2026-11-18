@@ -102,7 +102,8 @@ const exportFiles = async (files, isLocal = false, exportID = -1, isMPQ = false)
 
 	const manifest = { type: 'TEXTURES', exportID, succeeded: [], failed: [] };
 
-	for (let fileEntry of files) {
+	// Textures are independent of each other, so several are processed at once.
+	await generics.queue(files, async (fileEntry) => {
 		// Abort if the export has been cancelled.
 		if (helper.isCancelled())
 			return;
@@ -177,7 +178,10 @@ const exportFiles = async (files, isLocal = false, exportID = -1, isMPQ = false)
 			helper.mark(markFileName, false, e.message, e.stack);
 			manifest.failed.push({ type: format, fileDataID });
 		}
-	}
+	}, ExportHelper.getConcurrency());
+
+	if (helper.isCancelled())
+		return;
 
 	exportPaths?.close();
 

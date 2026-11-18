@@ -40,7 +40,9 @@ class ADTLoader {
 	 * @param {WDTLoader} wdt
 	 * @param {boolean} [monolithic=false]
 	 */
-	loadTex(wdt, monolithic = false) {
+	loadTex(wdt, monolithic = false, skipAlpha = false) {
+		// skipAlpha: don't decode alpha maps; used when only texture/effect references are needed.
+		this.skipAlpha = skipAlpha;
 		this.texChunks = new Array(16 * 16);
 		this.chunkIndex = 0;
 		this.wdt = wdt;
@@ -379,7 +381,7 @@ const ADTTexChunkHandlers = {
 			if (this.monolithic && chunkID === 0x4D434E52)
 				nextChunkPos += 13;
 
-			const handler = TexMCNKChunkHandlers[chunkID];
+			const handler = (this.skipAlpha && chunkID === 0x4D43414C) ? undefined : TexMCNKChunkHandlers[chunkID];
 			if (handler)
 				handler.call(chunk, data, subChunkSize, this.wdt);
 

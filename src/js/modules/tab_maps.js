@@ -3,6 +3,8 @@ const crypto = require('crypto');
 const core = require('../core');
 const log = require('../log');
 const path = require('path');
+const fsp = require('fs').promises;
+const generics = require('../generics');
 const listfile = require('../casc/listfile');
 const constants = require('../constants');
 const InstallType = require('../install-type');
@@ -99,6 +101,42 @@ const load_wmo_minimap_tile = async (x, y, size) => {
 		return await wmo_minimap.composite_tile(tile_list, size, core.view.casc, scale);
 	} catch (e) {
 		return false;
+	}
+};
+
+const TILE_STATE_FILE = '.wow_export_tiles.json';
+
+/**
+ * Load the set of tiles completed by a previous export into the given directory.
+ * Only used when overwriting is disabled, allowing an interrupted export to resume.
+ * @param {string} dir
+ * @param {string} signature Identifies the export settings/build the state applies to.
+ * @returns {Promise<Set<number>>}
+ */
+const load_tile_state = async (dir, signature) => {
+	try {
+		const state = JSON.parse(await fsp.readFile(path.join(dir, TILE_STATE_FILE), 'utf8'));
+		if (state.signature === signature && Array.isArray(state.tiles))
+			return new Set(state.tiles);
+	} catch {
+		// no state, or unreadable: start fresh.
+	}
+
+	return new Set();
+};
+
+/**
+ * Persist the set of completed tiles for an export directory.
+ * @param {string} dir
+ * @param {string} signature
+ * @param {Set<number>} tiles
+ */
+const save_tile_state = async (dir, signature, tiles) => {
+	try {
+		await fsp.mkdir(dir, { recursive: true });
+		await fsp.writeFile(path.join(dir, TILE_STATE_FILE), JSON.stringify({ signature, tiles: [...tiles] }));
+	} catch (e) {
+		log.write('Unable to save tile export state: %s', e.message);
 	}
 };
 
@@ -699,9 +737,30 @@ module.exports = {
 			const export_paths = this.$core.openLastExportStream();
 			const mark_path = path.join('maps', selected_map_dir, selected_map_dir);
 
-			for (const index of export_tiles) {
+			// With overwriting disabled, tiles finished by an earlier (interrupted)
+			// export of this map are skipped, so a large export can be resumed.
+			const config = this.$core.view.config;
+			const signature = 'RAW:' + (this.$core.view.casc?.build?.BuildKey ?? 'unknown') + ':' + [
+				config.mapsIncludeM2, config.mapsIncludeWMO, config.mapsIncludeFoliage, config.mapsIncludeLiquid,
+				config.modelsExportSkin, config.modelsExportSkel, config.modelsExportBone, config.modelsExportAnim, config.modelsExportWMOGroups
+			].map(e => e ? 1 : 0).join('');
+
+			const completed_tiles = config.overwriteFiles ? new Set() : await load_tile_state(dir, signature);
+			let unsaved_tiles = 0;
+
+			// Raw tiles share no state other than the de-duplicated asset exports,
+			// so several can be processed at once.
+			const tile_concurrency = Math.min(4, ExportHelper.getConcurrency());
+
+			await generics.queue(export_tiles, async (index) => {
 				if (helper.isCancelled())
-					break;
+					return;
+
+				if (completed_tiles.has(index)) {
+					log.write('Skipping tile %d (exported previously, overwrite disabled)', index);
+					helper.mark(mark_path, true);
+					return;
+				}
 
 				const adt = new ADTExporter(selected_map_id, selected_map_dir, index);
 
@@ -709,10 +768,18 @@ module.exports = {
 					const out = await adt.export(dir, 0, undefined, helper);
 					await export_paths?.writeLine(out.type + ':' + out.path);
 					helper.mark(mark_path, true);
+
+					completed_tiles.add(index);
+					if (++unsaved_tiles >= 16) {
+						unsaved_tiles = 0;
+						await save_tile_state(dir, signature, completed_tiles);
+					}
 				} catch (e) {
 					helper.mark(mark_path, false, e.message, e.stack);
 				}
-			}
+			}, tile_concurrency);
+
+			await save_tile_state(dir, signature, completed_tiles);
 
 			export_paths?.close();
 			ADTExporter.clearCache();
