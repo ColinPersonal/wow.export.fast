@@ -33,6 +33,14 @@ const getPoolSize = () => {
  * @param {Error} error
  */
 const fail = (error) => {
+	if (!broken) {
+		try {
+			require('./log').write('Export workers unavailable, continuing on the main thread: %s', error?.message ?? error);
+		} catch {
+			// logging is best-effort here
+		}
+	}
+
 	broken = true;
 
 	for (const task of tasks.values())
