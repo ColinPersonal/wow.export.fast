@@ -1,86 +1,67 @@
 # Gateway ↔ engine protocol (v1)
 
-How the gateway (`service/`, plain Node) talks to an engine (headless wow.export,
-`src/js/export-service/`).
+How the gateway (`service/`, plain Node) talks to an engine. The engine code is the
+headless export service (`src/js/headless/`). It runs under one of two hosts:
 
-## Starting an engine
-The gateway starts the app like this:
+- **Bun** (default): `bun src/js/headless/cli.js engine --config <engine.json>`
+- **NW.js** (WebGL-only job kinds): `wow.export.exe --user-data-dir=<dir> --disable-auto-update --export-service=<engine.json>`
 
-```
-wow.export.exe --user-data-dir=<root>/engines/<lane>/appdata --disable-auto-update --export-service=<root>/engines/<lane>/engine.json
-```
-
-`engine.json` contains:
+## engine.json
 ```json
 {
   "protocol": 1,
-  "lane": "quick" | "bulk",
+  "id": "wowf-quick",
   "gatewayPort": 51234,
   "secret": "<64 hex chars>",
-  "install": "C:\\Program Files (x86)\\World of Warcraft",
-  "product": "wow" ,
-  "region": "us",
-  "workDir": "<root>/engines/<lane>",
-  "baseConfig": { "exportConcurrency": 8, "...": "any core.view.config keys" }
+  "source": { "type": "local", "install": "C:\\Program Files (x86)\\World of Warcraft", "product": "wowf", "region": "us" },
+  "dataDir": "<root>/engines/wowf-quick",
+  "config": { "exportConcurrency": 8 }
 }
 ```
+For a CDN build, `source` is `{ "type": "remote", "product": "wow", "region": "us" }`.
+
 The engine connects to `127.0.0.1:<gatewayPort>` over TCP. Messages are UTF-8 JSON
-objects, one per line (`\n`-terminated). Each has a `t` field, its type.
+objects, one per line (`\n`-terminated). Each has a `t` field, its type. **If the socket
+closes, the engine exits**, so engines never outlive their gateway.
 
 ## Engine → gateway
 | t | fields | when |
 |---|---|---|
-| `hello` | `secret, lane, pid, protocol` | first message; the gateway closes the socket if the secret is wrong |
-| `state` | `state: "loading"\|"ready"\|"error", message?` | load progress or failure |
-| `ready` | `build: {version, buildKey, product}, listfile: {path, count}, loadMs` | CASC loaded; `listfile.path` is a TSV file the engine wrote in `workDir` (`<fileDataID>\t<path>` per line, lowercase paths) |
+| `hello` | `secret, id, pid, protocol, host: "bun"\|"nw"` | first message; the gateway closes the socket if the secret is wrong |
+| `ready` | `build: {product, version, buildConfig, fileCount}, loadMs, kinds: [...]` | game data open; `kinds` lists the job kinds this host supports |
+| `fatal` | `error: {code, message}` | could not open the game data; the engine exits afterwards |
 | `heartbeat` | `rss, heapUsed, job: id\|null, uptime` | every 5 s |
-| `progress` | `job, done, total, current?` | while a job runs (rate-limited to about 4 per second) |
-| `done` | `job, ok, cancelled, error?: {code, message}, items: {total, succeeded, failed: [{item, error}]}, stats: {ms, ...}` | job finished |
-| `reply` | `req, ok, result? , error?: {code, message}` | answer to a `query` |
+| `progress` | `job, done, total, current?` | while a job runs (at most about 4 per second) |
+| `done` | `job, ok, cancelled, error?: {code, message}, result, failed: [{item, error}]` | job finished; `result` is the service operation's return value |
+| `reply` | `req, ok, result?, error?: {code, message}` | answer to a `query` |
 
 ## Gateway → engine
 | t | fields | meaning |
 |---|---|---|
 | `welcome` | `` | secret accepted |
-| `job` | `job, kind, params, outDir` | run an export; the engine runs at most one job at a time |
+| `job` | `job, kind, params, outDir` | run an export into `outDir`; the engine runs at most one job at a time and rejects a second one with `done` `BUSY` |
 | `cancel` | `job` | cancel the running job; the engine answers with `done` and `cancelled: true` |
-| `query` | `req, kind, params` | read-only lookup; it may run while a job is running |
+| `query` | `req, kind, params` | read-only operation; it may run while a job is running |
 | `shutdown` | `` | exit cleanly |
 
-**Before every job** the engine restores the config it had right after loading, then
-applies `baseConfig`, then the job's own settings. It sets
-`exportDirectory = outDir` and `overwriteFiles = true`. Every file must be written under
-`outDir`.
+Before every job the engine restores its configuration, so nothing leaks from one job
+to the next. Every file is written under `outDir`; overwriting is on.
 
 ## Error codes
 `INVALID_PARAMS`, `NOT_FOUND`, `NOT_ON_MAP`, `UNSUPPORTED`, `EXPORT_FAILED`,
-`CANCELLED`, `BUSY`, `INTERNAL`.
+`CANCELLED`, `BUSY`, `SOURCE_UNAVAILABLE`, `INTERNAL`.
 
 `ok` is true only when every item succeeded. A job where some items failed is
-`ok: false` with no `error` and a non-empty `items.failed`; the gateway reports it as
+`ok: false` with no `error` and a non-empty `failed`; the gateway reports it as
 `partial`.
 
-## Job kinds (`params` are already validated and normalised by the gateway)
-In `files`, each entry is a fileDataID (number) or a listfile path (string,
-case-insensitive). The engine reports items it can't resolve as failed with `NOT_FOUND`.
+## Job kinds and queries
+Job and query kinds are the headless service's operations, named as in
+`src/js/headless/tools.js`. The params are the tool arguments, without
+`outDir`/`product`, which come from the gateway.
 
-| kind | params |
-|---|---|
-| `map_tiles` | `map` (ID or directory), `tiles` (tile spec: list of `"Y_X"`, `{from,to}` or `"all"`), `format: "OBJ"\|"RAW"\|"HEIGHTMAP"`, `quality` (int, OBJ only; 0 = none, -1 = alpha maps, >0 = baked size), `include: {m2, wmo, wmoSets, foliage, liquid, holes, gameObjects}`, `splitAlphaMaps`, `heightmap: {resolution, bitDepth}` |
-| `map_wmo` | `map` — exports the global WMO of a WMO-only map |
-| `minimap` | `map, tiles` — minimap tiles as PNG |
-| `model` | `files, format: "OBJ"\|"STL"\|"GLTF"\|"GLB"\|"RAW", textures, alpha, collision, animations, uv2, splitWMOGroups, meta, raw: {skin, skel, bone, anim, wmoGroups}` |
-| `texture` | `files, format: "PNG"\|"WEBP"\|"BLP", channelMask, webpQuality, blpMeta` |
-| `db2` | `tables, format: "CSV"\|"SQL"\|"DB2", sqlCreateTable` |
-| `raw` | `files, kind: "raw"\|"audio"\|"font"\|"text"` — files written as stored; audio with an unknown extension is sniffed to `.ogg`/`.mp3` |
-| `install_files` | `names?, tags?` |
-
-## Query kinds
-| kind | params | result |
-|---|---|---|
-| `list_maps` | `` | `[{id, directory, name, wdtFileDataID, tileCount, wmoOnly}]` |
-| `map_tiles` | `map` | `{map, tiles: ["Y_X", ...]}` (terrain tiles only, flag 1) |
-| `file_info` | `files` | `[{input, fileDataID, path, inBuild, size?}]` |
-| `list_db2_tables` | `` | `[name, ...]` |
-| `describe_db2` | `table` | `{table, columns: [{name, type}], rowCount}` |
-| `query_db2` | `table, ids?, where?: {field: value}, offset, limit` | `{rows, total}` |
+- **Queries:** `info`, `search`, `list_maps`, `list_map_tiles`, `query_table`,
+  `describe_table`, `list_tables`, `file_info`.
+- **Jobs:** `get_file`, `export_files`, `export_textures`, `export_model`,
+  `export_models`, `export_map`, `export_table`, and, on the NW host only,
+  `export_map_baked`, `export_minimap`.

@@ -15,6 +15,10 @@ at the end of every phase.
   auth and path-safety tests are green.
 - Never touch the prod folder `C:\Users\colin\wow.export`, its config or its cache.
 
+## Decisions
+- 2026-11-18: build on the existing headless MCP (src/js/headless, Bun) instead of new NW.js engines; NW.js only hosts WebGL-only kinds (baked terrain, minimaps) later. See plan Revision 2.
+- 2026-11-18: game data per request; default wowf from the local install (CDN fallback), other products from the CDN.
+
 ## Status
 | Phase | State | Notes |
 |---|---|---|

@@ -1,0 +1,19 @@
+{
+	"name": "wow-export-service",
+	"private": true,
+	"description": "Always-on wow.export export service for Claude Code agents (MCP over HTTP).",
+	"license": "MIT",
+	"type": "commonjs",
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"start": "node cli.js start",
+		"test": "node --test \"test/*.test.js\""
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.32.2",
+		"archiver": "^8.0.0",
+		"zod": "^4.6.7"
+	}
+}

@@ -4,7 +4,46 @@ Goal: Claude Code agents, both on this PC and in Claude Code cloud sessions, can
 for any wow.export export with their own parameters and get the files back. Requests
 must be fast, efficient and free of errors. This PC stays on and does the processing.
 
-Status: draft for approval. Work happens on branch `export-service`.
+Status: approved. Work happens on branch `export-service`.
+
+## Revision 2 (2026-11-18, evening): build on the existing headless MCP
+
+`origin/main` already has a headless exporter, `src/js/headless/`, written by another
+Claude session:
+- It runs on Bun, with no NW.js.
+- It has a stdio MCP server (`wow-export` in `.mcp.json`), a CLI, and `service.js`
+  with these operations: search, get_file, export_textures, export_model, list_maps,
+  list_map_tiles, export_map and query_table.
+
+The user chose to build on it rather than alongside it, and to choose game data per
+request. What changes from the plan below:
+
+1. **The engine is the headless service, run as a child process.**
+   - It runs as `bun src/js/headless/cli.js engine --config <engine.json>`, speaking
+     `service/PROTOCOL.md`.
+   - Its operations are extended to cover every export kind that doesn't need WebGL.
+   - Its stdio MCP and CLI keep working for agents on this PC, using the same code.
+2. **Game data per request.**
+   - `product` is an optional parameter on every tool. The default is `wowf`, opened
+     from the local install `C:\Program Files (x86)\World of Warcraft` (the same data as
+     the user's workstream), with the CDN as fallback.
+   - Any other product (`wow`, `wow_classic`, …) is opened from the CDN.
+   - The runtime gains `openLocal(install, product)` next to `openRemote`.
+   - Engines are keyed by product and lane:
+     - The default product keeps a quick engine and a bulk engine warm all the time.
+     - Other products start one engine on first use and stop it after 30 minutes idle.
+3. **A WebGL host for what Bun can't do.**
+   - These exports need a browser: baked terrain textures, minimap and WMO-minimap
+     compositing, and game objects on tiles.
+   - They run in the same engine code hosted inside headless wow.export (NW.js), started
+     with `--export-service=<engine.json>`.
+   - The gateway sends only those job kinds to it.
+   - This is a later phase. The Bun engine covers everything else first.
+4. **Data folders.** Each engine gets its own data dir under
+   `C:\Users\colin\wow.export-service\engines\<product>-<lane>\`.
+5. **Nothing else changes:** the gateway, the queue, the cache, the downloads, auth,
+   Funnel and the QA plan are as below. Where sections 1 and 3 describe NW.js-only
+   engines, this revision replaces them.
 
 ---
 
