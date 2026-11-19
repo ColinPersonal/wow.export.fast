@@ -49,6 +49,39 @@ bun ./build.js <BUILD1> <BUILD2> ...
 
 **Note**: The build process will automatically download nw.js headers and handle native add-on compilation if any are present in the `node_addons/` directory.
 
+## Tests and Benchmarks (Developers Only)
+
+Tests and benchmarks run on plain Node.js (v24+, the same V8 engine NW.js uses), with no extra dependencies and no WoW install needed. They cover the export pipeline pieces that run outside the app: PNG encoding, the export worker pool and its BLTE decoder, the export session (de-duplication and I/O limiting) and the export profiler.
+
+```
+# Run the tests.
+npm test
+
+# Run the benchmarks (bench:quick for a shorter run).
+npm run bench
+
+# Save a run, then compare a later run (e.g. after a change) against it.
+node bench/run.js --save before
+node bench/run.js --compare before
+
+# Only run matching cases, or include real exported PNGs.
+node bench/run.js --filter blte
+node bench/run.js --images <folder of exported PNGs>
+```
+
+Benchmark results are written to `bench/results/`, which is not committed.
+
+To benchmark real exports, export something in wow.export (the app writes a timing profile to `runtime.log` after every export), then:
+
+```
+# Show the export profiles from the current runtime.log.
+npm run bench:profiles
+
+# runtime.log is cleared when the app starts, so save profiles to compare later.
+node bench/export-profiles.js --save "before change"
+node bench/export-profiles.js --history
+```
+
 ## Debugging (Developers Only)
 > **Note**: Debugging is currently only supported on Windows.
 

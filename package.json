@@ -18,6 +18,12 @@
 	"engines": {
 		"bun": ">=1.2.0"
 	},
+	"scripts": {
+		"test": "node --test \"tests/*.test.js\"",
+		"bench": "node bench/run.js",
+		"bench:quick": "node bench/run.js --quick",
+		"bench:profiles": "node bench/export-profiles.js"
+	},
 	"dependencies": {
 		"adm-zip": "git+https://github.com/cthackers/adm-zip.git#1c7860ff5005cd30bf5dc6e557c9b312fedc0a66",
 		"rcedit": "^2.0.0",
