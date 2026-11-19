@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { resolveTiles, tileName } = require('../src/js/export-test-tiles');
+const { resolveTiles, tileName, hasTerrain } = require('../src/js/export-test-tiles');
 
 const wdt = { tiles: Array.from({ length: 4096 }, (_, i) => (i % 3 === 0 ? 1 : 0)) };
 
@@ -23,6 +23,18 @@ test('"all" returns every tile present in the WDT', () => {
 	const all = resolveTiles('all', wdt);
 	assert.equal(all.length, Math.ceil(4096 / 3));
 	assert.ok(all.every(i => wdt.tiles[i]));
+});
+
+test('only WDT flag 1 counts as terrain; other flags (2 = all water) do not', () => {
+	const water = { tiles: Array(4096).fill(0) };
+	water.tiles[10] = 1;
+	water.tiles[11] = 2;
+	water.tiles[12] = 3;
+	assert.deepEqual(resolveTiles('all', water), [10]);
+	assert.equal(hasTerrain(water, 10), true);
+	assert.equal(hasTerrain(water, 11), false);
+	assert.equal(hasTerrain(water, 12), false);
+	assert.equal(hasTerrain({}, 10), false);
 });
 
 test('invalid specs are rejected', () => {

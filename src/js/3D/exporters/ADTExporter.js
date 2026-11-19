@@ -509,7 +509,8 @@ class ADTExporter {
 		const obj1FileDataID = maid.obj1ADT > 0 ? maid.obj1ADT : listfile.getByFilename(tilePrefix + '_obj1.adt');
 
 		// Ensure we actually have the fileDataIDs for the files we need. LOD is not available on Classic.
-		if (rootFileDataID === 0 || tex0FileDataID === 0 || obj0FileDataID === 0 || obj1FileDataID === 0)
+		// Unknown file names resolve to undefined rather than 0.
+		if (!(rootFileDataID > 0) || !(tex0FileDataID > 0) || !(obj0FileDataID > 0) || !(obj1FileDataID > 0))
 			throw new Error('Missing fileDataID for ADT files: ' + [rootFileDataID, tex0FileDataID, obj0FileDataID].join(', '));
 
 		const tileStart = perf.now();

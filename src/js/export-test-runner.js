@@ -28,7 +28,7 @@ const ADTExporter = require('./3D/exporters/ADTExporter');
 const InstallType = require('./install-type');
 const constants = require('./constants');
 const cdnResolver = require('./casc/cdn-resolver');
-const { resolveTiles, tileName } = require('./export-test-tiles');
+const { resolveTiles, tileName, hasTerrain } = require('./export-test-tiles');
 
 const ARG_PREFIX = '--export-test=';
 
@@ -108,8 +108,10 @@ const runJob = async (core, job, outputRoot) => {
 	wdt.load();
 
 	const requested = resolveTiles(job.tiles, wdt);
-	const tiles = requested.filter(index => wdt.tiles?.[index]);
-	const missing = requested.filter(index => !wdt.tiles?.[index]);
+	// Only tiles flagged 1 have ADT files; the map viewer offers no others
+	// (e.g. 2 marks all-water tiles without terrain).
+	const tiles = requested.filter(index => hasTerrain(wdt, index));
+	const missing = requested.filter(index => !hasTerrain(wdt, index));
 
 	const limit = job.maxTiles ?? Infinity;
 	if (tiles.length > limit)

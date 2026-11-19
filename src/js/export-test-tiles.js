@@ -25,7 +25,7 @@ const resolveTiles = (spec, wdt) => {
 	};
 
 	if (spec === 'all')
-		return wdt.tiles.map((flag, index) => flag ? index : -1).filter(i => i >= 0);
+		return wdt.tiles.map((flag, index) => flag === 1 ? index : -1).filter(i => i >= 0);
 
 	if (Array.isArray(spec))
 		return spec.map(name => { const [a, b] = parse(name); return a * MAP_SIZE + b; });
@@ -50,4 +50,14 @@ const resolveTiles = (spec, wdt) => {
  */
 const tileName = (index) => Math.floor(index / MAP_SIZE) + '_' + (index % MAP_SIZE);
 
-module.exports = { resolveTiles, tileName, MAP_SIZE };
+/**
+ * True if a WDT marks the tile as having terrain (ADT files). Only flag 1
+ * counts, matching the map viewer; other values (such as 2 for all-water
+ * tiles) have no ADT files to export.
+ * @param {object} wdt
+ * @param {number} index
+ * @returns {boolean}
+ */
+const hasTerrain = (wdt, index) => wdt.tiles?.[index] === 1;
+
+module.exports = { resolveTiles, tileName, hasTerrain, MAP_SIZE };
