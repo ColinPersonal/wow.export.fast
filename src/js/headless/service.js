@@ -74,16 +74,26 @@ const getDefaultOutputDirectory = () => path.resolve(process.env.WOW_EXPORT_OUT 
 
 /**
  * Open the game data source. Subsequent calls reuse the same instance.
+ * With an installation directory (options.install or WOW_EXPORT_INSTALL) the
+ * build is read from that local installation, with files it lacks fetched
+ * from the CDN; otherwise the build is opened from the CDN.
  * @param {object} [options]
  * @param {string} [options.region=us]
  * @param {string} [options.product=wow]
+ * @param {string} [options.install] Local installation directory.
  */
 const open = (options = {}) => {
 	if (cascPromise === null) {
-		openOptions = { region: options.region ?? process.env.WOW_EXPORT_REGION ?? 'us', product: options.product ?? process.env.WOW_EXPORT_PRODUCT ?? 'wow' };
+		const install = options.install ?? process.env.WOW_EXPORT_INSTALL ?? null;
+		openOptions = {
+			region: options.region ?? process.env.WOW_EXPORT_REGION ?? 'us',
+			product: options.product ?? process.env.WOW_EXPORT_PRODUCT ?? 'wow',
+			install: install || null
+		};
 		installTracking();
 
-		cascPromise = runtime.openRemote(openOptions).then(casc => {
+		const opening = openOptions.install ? runtime.openLocal(openOptions) : runtime.openRemote(openOptions);
+		cascPromise = opening.then(casc => {
 			// The app resolves worker scripts relative to its working directory.
 			require('../worker-pool').setScriptPath(path.join(__dirname, '..', 'workers', 'export-worker.js'));
 			return casc;
@@ -203,6 +213,8 @@ const info = async () => {
 	return {
 		product: openOptions.product,
 		region: openOptions.region,
+		source: openOptions.install ? 'local' : 'cdn',
+		install: openOptions.install,
 		version: casc.build?.VersionsName ?? null,
 		buildConfig: casc.build?.BuildConfig ?? null,
 		fileCount: casc.rootEntries?.size ?? 0,

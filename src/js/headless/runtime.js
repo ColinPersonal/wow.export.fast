@@ -117,4 +117,48 @@ const openRemote = async ({ region = 'us', product = 'wow' } = {}) => {
 	return casc;
 };
 
-module.exports = { init, openRemote, core, constants, log, DATA_DIR };
+/**
+ * Open a game build from a local installation. Files the installation does
+ * not have are fetched from the CDN of the given region.
+ * @param {object} options
+ * @param {string} options.install Installation directory (contains .build.info).
+ * @param {string} [options.product=wow]
+ * @param {string} [options.region=us] CDN region used for missing files.
+ * @returns {Promise<CASC>}
+ */
+const openLocal = async ({ install, product = 'wow', region = 'us' } = {}) => {
+	await init();
+
+	if (typeof install !== 'string' || install.length === 0)
+		throw new Error('A local installation directory is required');
+
+	// The source select screen normally picks the CDN region used for files
+	// missing from the installation.
+	const regionInfo = constants.PATCH.REGIONS.find(r => r.tag === region);
+	if (regionInfo === undefined)
+		throw new Error('Unknown CDN region "' + region + '"');
+
+	const regionNode = {
+		tag: regionInfo.tag,
+		name: regionInfo.name,
+		url: regionInfo.tag === 'cn' ? constants.PATCH.HOST_CHINA : require('util').format(constants.PATCH.HOST, regionInfo.tag),
+		delay: null
+	};
+	core.view.cdnRegions = [regionNode];
+	core.view.selectedCDNRegion = regionNode;
+	core.view.lockCDNRegion = true;
+	require('../casc/cdn-resolver').startPreResolution(regionInfo.tag);
+
+	const CASCLocal = require('../casc/casc-source-local');
+	const casc = new CASCLocal(install);
+	await casc.init();
+
+	const buildIndex = casc.builds.findIndex(build => build?.Product === product);
+	if (buildIndex === -1)
+		throw new Error('Product "' + product + '" is not installed in ' + install + ' (installed: ' + casc.builds.map(b => b?.Product).join(', ') + ')');
+
+	await casc.load(buildIndex);
+	return casc;
+};
+
+module.exports = { init, openRemote, openLocal, core, constants, log, DATA_DIR };
