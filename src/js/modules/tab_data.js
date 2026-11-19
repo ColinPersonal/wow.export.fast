@@ -1,5 +1,5 @@
 const log = require('../log');
-const WDCReader = require('../db/WDCReader');
+const parse_table = require('../db/parse-table');
 const dbd_manifest = require('../casc/dbd-manifest');
 const dataExporter = require('../ui/data-exporter');
 const ExportHelper = require('../casc/export-helper');
@@ -18,45 +18,6 @@ const initialize_available_tables = async (core) => {
 	const table_names = dbd_manifest.getAllTableNames();
 	manifest.push(...table_names);
 	log.write('initialized available db2 tables from dbd manifest');
-};
-
-const parse_table = async (table_name) => {
-	const db2_reader = new WDCReader('DBFilesClient/' + table_name + '.db2');
-	await db2_reader.parse();
-
-	const all_headers = [...db2_reader.schema.keys()];
-	const id_index = all_headers.findIndex(header => header.toUpperCase() === 'ID');
-	if (id_index > 0) {
-		const id_header = all_headers.splice(id_index, 1)[0];
-		all_headers.unshift(id_header);
-	}
-
-	const rows = await db2_reader.getAllRows();
-	const parsed = Array(rows.size);
-
-	let index = 0;
-	for (const row of rows.values()) {
-		const row_values = Object.values(row);
-		if (id_index > 0) {
-			const id_value = row_values.splice(id_index, 1)[0];
-			row_values.unshift(id_value);
-		}
-
-		// coerce BigInt to Number to avoid JSON.stringify crash in Vue rendering
-		for (let i = 0; i < row_values.length; i++) {
-			const val = row_values[i];
-			if (typeof val === 'bigint')
-				row_values[i] = Number(val);
-			else if (Array.isArray(val))
-				for (let j = 0; j < val.length; j++)
-					if (typeof val[j] === 'bigint')
-						val[j] = Number(val[j]);
-		}
-
-		parsed[index++] = row_values;
-	}
-
-	return { headers: all_headers, rows: parsed, schema: db2_reader.schema };
 };
 
 const load_table = async (core, table_name) => {

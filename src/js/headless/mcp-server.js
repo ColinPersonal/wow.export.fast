@@ -12,8 +12,8 @@ const PROTOCOL_VERSION = '2025-06-18';
 const SUPPORTED_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 const INSTRUCTIONS = [
-	'Exports World of Warcraft game files (textures, models, maps, database tables) from Blizzard\'s CDN to local disk.',
-	'Use search to find file names or fileDataIDs, then get_file, export_textures, export_model or export_map to write files.',
+	'Exports World of Warcraft game files (textures, models, maps, database tables, sounds) to local disk, from a local installation (WOW_EXPORT_INSTALL) or Blizzard\'s CDN.',
+	'Use search to find file names or fileDataIDs, then get_file, export_files, export_textures, export_model(s), export_map or export_table to write files. Errors start with a code such as NOT_FOUND or INVALID_PARAMS.',
 	'Tools return the paths of the files they wrote; read those files from disk rather than expecting file contents in the result.',
 	'The first call opens the game build, which takes around 20 seconds with a warm cache and a few minutes on a fresh machine.'
 ].join(' ');
@@ -52,7 +52,7 @@ const handle = async (message, context) => {
 				const result = await call(name, message.params?.arguments ?? {});
 				return { content: [{ type: 'text', text: JSON.stringify(result, null, 1) }], structuredContent: result, isError: false };
 			} catch (e) {
-				return { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true };
+				return { content: [{ type: 'text', text: 'Error' + (typeof e.code === 'string' ? ' ' + e.code : '') + ': ' + e.message }], isError: true };
 			}
 		}
 

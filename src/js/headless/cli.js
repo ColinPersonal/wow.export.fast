@@ -32,7 +32,8 @@ const usage = () => {
 	}
 
 	lines.push('  ' + 'mcp'.padEnd(16) + 'Run as a Model Context Protocol server over stdio.');
-	lines.push('', 'Environment:', '  WOW_EXPORT_OUT        Default output directory (default: ./wow-export)', '  WOW_EXPORT_DATA_DIR   Cache and configuration directory (default: ~/.wow.export-headless)', '  WOW_EXPORT_PRODUCT    Game product to open (default: wow)', '  WOW_EXPORT_REGION     CDN region (default: us)');
+	lines.push('  ' + 'engine'.padEnd(16) + 'Run as an export service engine: --config <engine.json> (see service/PROTOCOL.md).');
+	lines.push('', 'Environment:', '  WOW_EXPORT_OUT        Default output directory (default: ./wow-export)', '  WOW_EXPORT_DATA_DIR   Cache and configuration directory (default: ~/.wow.export-headless)', '  WOW_EXPORT_INSTALL    Local installation to read instead of the CDN (default: none)', '  WOW_EXPORT_PRODUCT    Game product to open (default: wow)', '  WOW_EXPORT_REGION     CDN region (default: us)');
 
 	return lines.join('\n');
 };
@@ -102,6 +103,24 @@ const parseArguments = (tool, args) => {
 	if (command === 'mcp') {
 		await require('./mcp-server').serve();
 		return 0;
+	}
+
+	if (command === 'engine') {
+		// Run as an export service engine (see service/PROTOCOL.md). Runs until
+		// the gateway disconnects; the engine exits the process itself.
+		const index = argv.indexOf('--config');
+		const file = index !== -1 ? argv[index + 1] : undefined;
+		if (file === undefined)
+			throw new Error('engine needs --config <engine.json>');
+
+		const config = JSON.parse(require('fs').readFileSync(file, 'utf8'));
+
+		// The runtime reads its data directory when it is first loaded.
+		if (typeof config.dataDir === 'string' && config.dataDir.length > 0)
+			process.env.WOW_EXPORT_DATA_DIR = config.dataDir;
+
+		await require('./engine').runEngine(config);
+		return new Promise(() => {});
 	}
 
 	const { tools, call } = require('./tools');
