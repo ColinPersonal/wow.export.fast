@@ -42,12 +42,28 @@ class PNGWriter {
 	}
 
 	/**
+	 * True if the pixel format is the default 8-bit RGBA.
+	 * @returns {boolean}
+	 */
+	isRGBA() {
+		return this.bytesPerPixel === 4 && this.bitDepth === 8 && this.colorType === 6;
+	}
+
+	/**
+	 * The pixel format set on this writer.
+	 * @returns {{bytesPerPixel: number, bitDepth: number, colorType: number}}
+	 */
+	format() {
+		return { bytesPerPixel: this.bytesPerPixel, bitDepth: this.bitDepth, colorType: this.colorType };
+	}
+
+	/**
 	 * Encode this PNG synchronously on the calling thread.
 	 * @returns {BufferWrapper}
 	 */
 	getBuffer() {
 		const start = perf.now();
-		const buf = new BufferWrapper(pngEncode.encode(this.data, this.width, this.height, PNGWriter.fastMode));
+		const buf = new BufferWrapper(pngEncode.encode(this.data, this.width, this.height, PNGWriter.fastMode, this.isRGBA() ? null : this.format()));
 		perf.add('png.encode', perf.now() - start, buf.byteLength);
 
 		return buf;
@@ -58,7 +74,8 @@ class PNGWriter {
 	 * @returns {Promise<BufferWrapper>}
 	 */
 	async getBufferAsync() {
-		if (this.width * this.height >= WORKER_MIN_PIXELS && workerPool.isAvailable()) {
+		// Workers encode 8-bit RGBA only; other formats (heightmaps) encode here.
+		if (this.isRGBA() && this.width * this.height >= WORKER_MIN_PIXELS && workerPool.isAvailable()) {
 			const start = perf.now();
 			try {
 				const encoded = await workerPool.encodePNG(this.data, this.width, this.height, PNGWriter.fastMode);

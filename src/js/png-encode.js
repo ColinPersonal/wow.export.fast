@@ -227,15 +227,24 @@ const crc32 = (buf, start, end) => {
 };
 
 /**
- * Encode 8-bit RGBA pixel data as a PNG file.
- * @param {Uint8Array} data RGBA pixel data (width * height * 4 bytes).
+ * Encode pixel data as a PNG file. By default the data is 8-bit RGBA.
+ * @param {Uint8Array} data Pixel data (at least width * height * bytesPerPixel bytes).
  * @param {number} width
  * @param {number} height
  * @param {boolean} [fast=false] Use the fast filter and a low compression level.
+ * @param {object} [format] Other pixel formats, e.g. 16-bit greyscale heightmaps.
+ * @param {number} [format.bytesPerPixel=4]
+ * @param {number} [format.bitDepth=8]
+ * @param {number} [format.colorType=6] PNG colour type (0 grey, 2 RGB, 4 grey+alpha, 6 RGBA).
  * @returns {Buffer}
  */
-const encode = (data, width, height, fast = false) => {
-	const bytesPerPixel = 4;
+const encode = (data, width, height, fast = false, format = null) => {
+	const bytesPerPixel = format?.bytesPerPixel ?? 4;
+	const bitDepth = format?.bitDepth ?? 8;
+	const colorType = format?.colorType ?? 6;
+
+	if (data.length > width * height * bytesPerPixel)
+		data = data.subarray(0, width * height * bytesPerPixel);
 
 	let deflated;
 	if (fast)
@@ -260,8 +269,8 @@ const encode = (data, width, height, fast = false) => {
 	ofs = out.writeUInt32BE(0x49484452, ofs);
 	ofs = out.writeUInt32BE(width, ofs);
 	ofs = out.writeUInt32BE(height, ofs);
-	ofs = out.writeUInt8(8, ofs); // Bit-depth
-	ofs = out.writeUInt8(6, ofs); // Colour type (RGBA)
+	ofs = out.writeUInt8(bitDepth, ofs); // Bit-depth
+	ofs = out.writeUInt8(colorType, ofs); // Colour type
 	ofs = out.writeUInt8(0, ofs); // Compression
 	ofs = out.writeUInt8(0, ofs); // Filter
 	ofs = out.writeUInt8(0, ofs); // Interlace

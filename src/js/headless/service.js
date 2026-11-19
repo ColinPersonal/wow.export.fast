@@ -4,17 +4,24 @@
  */
 
 // Headless export service. A small, UI-free API over the application's data
-// and export layers, shared by the command line interface and the MCP server.
-// Every operation writes files beneath an output directory and returns a
-// plain, JSON-serialisable description of what was produced.
+// and export layers, shared by the command line interface, the MCP server and
+// the export service engine (engine.js). Every operation writes files beneath
+// an output directory and returns a plain, JSON-serialisable description of
+// what was produced.
+//
+// Errors carry a `code` (see errors.js) so callers can tell bad input from
+// missing files and export failures.
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const util = require('util');
 const runtime = require('./runtime');
+const { CODES, fail } = require('./errors');
+const { audioFileName } = require('./sniff');
 
 const MAP_SIZE = 64;
 const MAX_LISTED_FILES = 200;
+const MAX_BATCH = 20000;
 
 const SEARCH_TYPES = {
 	texture: 'listfileTextures',
@@ -24,9 +31,16 @@ const SEARCH_TYPES = {
 	font: 'listfileFonts'
 };
 
+const MODEL_FORMATS = { raw: 'RAW', obj: 'OBJ', stl: 'STL', gltf: 'GLTF', glb: 'GLB' };
+const TABLE_FORMATS = { csv: 'CSV', sql: 'SQL', db2: 'DB2' };
+const HEIGHTMAP_BIT_DEPTHS = [8, 16, 32];
+
 let cascPromise = null;
 let openOptions = {};
 let jobQueue = Promise.resolve();
+
+// The job currently running (see runJob), or null.
+let activeJob = null;
 
 // --- written file tracking -------------------------------------------------
 
@@ -40,7 +54,8 @@ const recordWrite = (file) => {
 
 /**
  * Observe the file writes made by the exporters so that each operation can
- * report exactly which files it produced.
+ * report exactly which files it produced, and the progress, failures and
+ * cancellation of the export helpers they use.
  */
 const installTracking = () => {
 	if (trackingInstalled)
@@ -65,6 +80,25 @@ const installTracking = () => {
 	fsp.writeFile = function(file, ...args) {
 		recordWrite(file);
 		return writeFile.call(this, file, ...args);
+	};
+
+	// Exporters report each finished item through ExportHelper.mark(); that
+	// drives job progress and the list of failed items.
+	const ExportHelper = require('../casc/export-helper');
+	const mark = ExportHelper.prototype.mark;
+	ExportHelper.prototype.mark = function(item, state, error, stackTrace) {
+		activeJob?.item(item, state, error, CODES.EXPORT_FAILED, this.count);
+		return mark.call(this, item, state, error, stackTrace);
+	};
+
+	// ExportHelper.start() clears the cancelled flag; keep it set for a job
+	// that was cancelled before its exporter started.
+	const isCancelled = ExportHelper.prototype.isCancelled;
+	ExportHelper.prototype.isCancelled = function() {
+		if (activeJob?.cancelled)
+			runtime.core.view.exportCancelled = true;
+
+		return isCancelled.call(this);
 	};
 };
 
@@ -97,6 +131,8 @@ const open = (options = {}) => {
 			// The app resolves worker scripts relative to its working directory.
 			require('../worker-pool').setScriptPath(path.join(__dirname, '..', 'workers', 'export-worker.js'));
 			return casc;
+		}, e => {
+			throw Object.assign(fail(CODES.SOURCE_UNAVAILABLE, 'Unable to open game data (' + openOptions.product + (openOptions.install ? ' from ' + openOptions.install : ' from the CDN') + '): ' + e.message), { cause: e });
 		});
 
 		cascPromise.catch(() => cascPromise = null);
@@ -118,20 +154,119 @@ const resolveFile = (file) => {
 
 	if (typeof file === 'number') {
 		if (!Number.isInteger(file) || file <= 0)
-			throw new Error('Invalid fileDataID: ' + file);
+			throw fail(CODES.INVALID_PARAMS, 'Invalid fileDataID: ' + file);
 
 		return { fileDataID: file, fileName: listfile.getByID(file) ?? listfile.formatUnknownFile(file) };
 	}
 
 	if (typeof file !== 'string' || file.trim().length === 0)
-		throw new Error('A file must be given as a fileDataID or a file name');
+		throw fail(CODES.INVALID_PARAMS, 'A file must be given as a fileDataID or a file name');
 
 	const fileName = file.trim().toLowerCase().replace(/\\/g, '/');
 	const fileDataID = listfile.getByFilename(fileName);
 	if (!(fileDataID > 0))
-		throw new Error('File not found in listfile: ' + fileName + ' (use search to find the right name)');
+		throw fail(CODES.NOT_FOUND, 'File not found in listfile: ' + fileName + ' (use search to find the right name)');
 
 	return { fileDataID, fileName };
+};
+
+/**
+ * True if the open build contains the file.
+ * @param {object} casc
+ * @param {number} fileDataID
+ */
+const inBuild = (casc, fileDataID) => casc.rootEntries?.has(fileDataID) ?? true;
+
+/**
+ * Resolve every file of a batch. Files that cannot be resolved or are not in
+ * the open build are reported through job.item() as NOT_FOUND and left out.
+ * @returns {Array<{fileDataID: number, fileName: string, input: *}>}
+ */
+const resolveBatch = (casc, files, job) => {
+	if (!Array.isArray(files) || files.length === 0)
+		throw fail(CODES.INVALID_PARAMS, 'A non-empty list of files is required');
+
+	if (files.length > MAX_BATCH)
+		throw fail(CODES.INVALID_PARAMS, 'Too many files in one request (' + files.length + ', maximum ' + MAX_BATCH + ')');
+
+	const resolved = [];
+	const seen = new Set();
+
+	for (const input of files) {
+		let entry;
+		try {
+			entry = resolveFile(input);
+			if (!inBuild(casc, entry.fileDataID))
+				throw fail(CODES.NOT_FOUND, 'File ' + entry.fileDataID + ' (' + entry.fileName + ') is not in this build');
+		} catch (e) {
+			job.item(String(input), false, e.message, e.code ?? CODES.NOT_FOUND, files.length);
+			continue;
+		}
+
+		if (seen.has(entry.fileDataID))
+			continue;
+
+		seen.add(entry.fileDataID);
+		resolved.push(Object.assign(entry, { input }));
+	}
+
+	return resolved;
+};
+
+/**
+ * State of one running job: progress, failed items and cancellation.
+ */
+const createJob = (onProgress) => {
+	let lastProgress = 0;
+
+	const job = {
+		done: 0,
+		total: 0,
+		failed: [],
+		cancelled: false,
+
+		/**
+		 * Record a finished item.
+		 * @param {string} item
+		 * @param {boolean} ok
+		 * @param {string} [error]
+		 * @param {string} [code]
+		 * @param {number} [total]
+		 */
+		item(item, ok, error, code = CODES.EXPORT_FAILED, total) {
+			job.done++;
+			if (total > job.total)
+				job.total = total;
+
+			if (!ok)
+				job.failed.push({ item: String(item), code, error: String(error ?? 'export failed') });
+
+			job.progress(String(item));
+		},
+
+		progress(current, force = false) {
+			if (typeof onProgress !== 'function')
+				return;
+
+			const now = Date.now();
+			if (!force && now - lastProgress < 250 && job.done < job.total)
+				return;
+
+			lastProgress = now;
+			try {
+				onProgress(job.done, Math.max(job.total, job.done), current);
+			} catch {
+				// progress reporting never fails a job
+			}
+		},
+
+		throwIfCancelled() {
+			if (job.cancelled)
+				throw fail(CODES.CANCELLED, 'Export was cancelled');
+		}
+	};
+
+	return job;
 };
 
 /**
@@ -140,7 +275,8 @@ const resolveFile = (file) => {
  * @param {object} options
  * @param {string} [options.outDir] Output directory for this job.
  * @param {object} [options.config] Configuration overrides for this job.
- * @param {function} fn Receives ({ casc, core, outDir }).
+ * @param {function} [options.onProgress] Called with (done, total, current item).
+ * @param {function} fn Receives ({ casc, core, outDir, job }).
  */
 const runJob = (options, fn) => {
 	const job = jobQueue.then(async () => {
@@ -155,10 +291,12 @@ const runJob = (options, fn) => {
 		core.view.exportCancelled = false;
 
 		activeWrites = { root: outDir, files: new Set() };
+		activeJob = createJob(options.onProgress);
+		const state = activeJob;
 		const start = Date.now();
 
 		try {
-			const result = await fn({ casc, core, outDir }) ?? {};
+			const result = await fn({ casc, core, outDir, job: state }) ?? {};
 			const files = [...activeWrites.files].sort();
 
 			let bytes = 0;
@@ -170,6 +308,8 @@ const runJob = (options, fn) => {
 				}
 			}
 
+			state.progress(null, true);
+
 			return Object.assign(result, {
 				outputDirectory: outDir,
 				fileCount: files.length,
@@ -177,10 +317,14 @@ const runJob = (options, fn) => {
 				seconds: Number(((Date.now() - start) / 1000).toFixed(2)),
 				files: files.slice(0, MAX_LISTED_FILES).map(file => path.relative(outDir, file).replace(/\\/g, '/')),
 				filesTruncated: files.length > MAX_LISTED_FILES,
+				failed: state.failed,
+				cancelled: state.cancelled,
 				profile: perf.summary()
 			});
 		} finally {
 			activeWrites = null;
+			activeJob = null;
+			core.view.exportCancelled = false;
 
 			// Restore configuration so one job's options do not leak into the next.
 			for (const key of Object.keys(core.view.config))
@@ -195,6 +339,25 @@ const runJob = (options, fn) => {
 	return job;
 };
 
+/**
+ * Cancel the running job, if any. Exporters stop at their next check; the
+ * job's result then has `cancelled: true`.
+ * @returns {boolean} True if a job was running.
+ */
+const cancel = () => {
+	if (activeJob === null)
+		return false;
+
+	activeJob.cancelled = true;
+	runtime.core.view.exportCancelled = true;
+	return true;
+};
+
+/**
+ * True while a job is running.
+ */
+const isBusy = () => activeJob !== null;
+
 const startHelper = (count, unit) => {
 	const ExportHelper = require('../casc/export-helper');
 	const helper = new ExportHelper(count, unit);
@@ -202,6 +365,8 @@ const startHelper = (count, unit) => {
 
 	return helper;
 };
+
+const lower = (value, fallback) => (typeof value === 'string' ? value : fallback).toLowerCase();
 
 // --- operations ------------------------------------------------------------
 
@@ -215,8 +380,9 @@ const info = async () => {
 		region: openOptions.region,
 		source: openOptions.install ? 'local' : 'cdn',
 		install: openOptions.install,
-		version: casc.build?.VersionsName ?? null,
-		buildConfig: casc.build?.BuildConfig ?? null,
+		// CDN builds name their version VersionsName; .build.info calls it Version.
+		version: casc.build?.VersionsName ?? casc.build?.Version ?? null,
+		buildConfig: casc.build?.BuildConfig ?? casc.build?.BuildKey ?? null,
 		fileCount: casc.rootEntries?.size ?? 0,
 		defaultOutputDirectory: getDefaultOutputDirectory()
 	};
@@ -229,25 +395,32 @@ const info = async () => {
  * @param {string} [options.type=any] texture, model, sound, text, font or any.
  * @param {number} [options.limit=50]
  * @param {number} [options.offset=0]
+ * @param {boolean} [options.allowRegex=true] Accept /regex/ queries. Services exposed over a network pass false.
  */
-const search = async ({ query, type = 'any', limit = 50, offset = 0 } = {}) => {
+const search = async ({ query, type = 'any', limit = 50, offset = 0, allowRegex = true } = {}) => {
 	await open();
 
 	if (typeof query !== 'string' || query.trim().length === 0)
-		throw new Error('A search query is required');
+		throw fail(CODES.INVALID_PARAMS, 'A search query is required');
 
 	if (type !== 'any' && SEARCH_TYPES[type] === undefined)
-		throw new Error('Unknown search type "' + type + '" (expected one of: any, ' + Object.keys(SEARCH_TYPES).join(', ') + ')');
+		throw fail(CODES.INVALID_PARAMS, 'Unknown search type "' + type + '" (expected one of: any, ' + Object.keys(SEARCH_TYPES).join(', ') + ')');
 
 	const listfile = require('../casc/listfile');
 	const view = runtime.core.view;
 
 	let matcher;
 	const regex = query.trim().match(/^\/(.+)\/([a-z]*)$/);
-	if (regex) {
-		const pattern = new RegExp(regex[1], regex[2].includes('i') ? regex[2] : regex[2] + 'i');
+	if (regex && allowRegex) {
+		let pattern;
+		try {
+			pattern = new RegExp(regex[1], regex[2].includes('i') ? regex[2] : regex[2] + 'i');
+		} catch (e) {
+			throw fail(CODES.INVALID_PARAMS, 'Invalid regular expression: ' + e.message);
+		}
 		matcher = (entry) => pattern.test(entry);
 	} else {
+		// Without regex support a /pattern/ is matched as plain text.
 		const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
 		matcher = (entry) => terms.every(term => entry.includes(term));
 	}
@@ -276,24 +449,55 @@ const search = async ({ query, type = 'any', limit = 50, offset = 0 } = {}) => {
 };
 
 /**
+ * Resolve files to fileDataIDs and names and report whether the open build
+ * contains them.
+ * @param {object} options
+ * @param {Array<number|string>} options.files
+ */
+const fileInfo = async ({ files } = {}) => {
+	const casc = await open();
+
+	if (!Array.isArray(files) || files.length === 0)
+		throw fail(CODES.INVALID_PARAMS, 'A non-empty list of files is required');
+
+	if (files.length > 1000)
+		throw fail(CODES.INVALID_PARAMS, 'At most 1000 files per call');
+
+	const results = files.map(input => {
+		try {
+			const { fileDataID, fileName } = resolveFile(input);
+			const listfile = require('../casc/listfile');
+			return { input, fileDataID, fileName, named: listfile.getByID(fileDataID) !== undefined, inBuild: inBuild(casc, fileDataID) };
+		} catch (e) {
+			return { input, error: { code: e.code ?? CODES.INTERNAL, message: e.message } };
+		}
+	});
+
+	return { count: results.length, files: results };
+};
+
+/**
  * Fetch a single file.
  * @param {object} options
  * @param {number|string} options.file fileDataID or file name.
  * @param {string} [options.format=raw] raw, or png (BLP textures only).
  * @param {string} [options.outDir]
  */
-const getFile = ({ file, format = 'raw', outDir } = {}) => {
+const getFile = ({ file, format = 'raw', outDir, onProgress } = {}) => {
 	if (format !== 'raw' && format !== 'png')
-		throw new Error('Unknown format "' + format + '" (expected raw or png)');
+		throw fail(CODES.INVALID_PARAMS, 'Unknown format "' + format + '" (expected raw or png)');
 
-	return runJob({ outDir, config: { overwriteFiles: true } }, async ({ casc, outDir }) => {
+	return runJob({ outDir, onProgress, config: { overwriteFiles: true } }, async ({ casc, outDir, job }) => {
 		const { fileDataID, fileName } = resolveFile(file);
+		if (!inBuild(casc, fileDataID))
+			throw fail(CODES.NOT_FOUND, 'File ' + fileDataID + ' (' + fileName + ') is not in this build');
+
 		const data = await casc.getFile(fileDataID);
 
 		let outFile = path.join(outDir, fileName);
 		if (format === 'png') {
 			if (!fileName.endsWith('.blp'))
-				throw new Error('Only BLP textures can be converted to PNG: ' + fileName);
+				throw fail(CODES.UNSUPPORTED, 'Only BLP textures can be converted to PNG: ' + fileName);
 
 			const BLPFile = require('../casc/blp');
 			outFile = outFile.slice(0, -4) + '.png';
@@ -302,7 +506,54 @@ const getFile = ({ file, format = 'raw', outDir } = {}) => {
 			await data.writeToFile(outFile);
 		}
 
+		job.item(fileName, true, null, null, 1);
 		return { fileDataID, fileName, format, path: outFile };
+	});
+};
+
+/**
+ * Export several files unmodified. Sounds named .unk_sound (or unnamed) are
+ * given an .ogg or .mp3 extension when their content is recognised.
+ * @param {object} options
+ * @param {Array<number|string>} options.files
+ * @param {string} [options.outDir]
+ */
+const exportFiles = ({ files, outDir, onProgress } = {}) => {
+	return runJob({ outDir, onProgress, config: { overwriteFiles: true } }, async ({ casc, outDir, job }) => {
+		const resolved = resolveBatch(casc, files, job);
+		job.total = files.length;
+
+		const generics = require('../generics');
+		const ExportHelper = require('../casc/export-helper');
+		const written = [];
+
+		await generics.queue(resolved, async (entry) => {
+			if (job.cancelled)
+				return;
+
+			try {
+				const data = await casc.getFile(entry.fileDataID);
+				let name = entry.fileName;
+
+				if (name.toLowerCase().endsWith('.unk_sound') || path.extname(name) === '') {
+					const head = data.raw.subarray(0, 4);
+					const sniffed = audioFileName(path.extname(name) === '' ? name + '.unk_sound' : name, head);
+					if (!sniffed.endsWith('.unk_sound'))
+						name = sniffed;
+				}
+
+				const out = path.join(outDir, name);
+				await data.writeToFile(out);
+				written.push({ fileDataID: entry.fileDataID, fileName: entry.fileName, path: out });
+				job.item(name, true, null, null, files.length);
+			} catch (e) {
+				job.item(entry.fileName, false, e.message, e.code ?? CODES.EXPORT_FAILED, files.length);
+			}
+		}, ExportHelper.getConcurrency());
+
+		job.throwIfCancelled();
+		written.sort((a, b) => a.fileName.localeCompare(b.fileName));
+		return { requested: files.length, exported: written.length, exportedFiles: written.slice(0, MAX_LISTED_FILES) };
 	});
 };
 
@@ -311,40 +562,110 @@ const getFile = ({ file, format = 'raw', outDir } = {}) => {
  * @param {object} options
  * @param {Array<number|string>} options.files
  * @param {string} [options.format=png] png, webp or blp.
+ * @param {number} [options.channelMask] RGBA channel bit mask (default 0b1111).
+ * @param {boolean} [options.skipMissing=false] Report files that cannot be found as failed items instead of failing the whole call.
  * @param {string} [options.outDir]
  */
-const exportTextures = ({ files, format = 'png', outDir } = {}) => {
+const exportTextures = ({ files, format = 'png', channelMask, skipMissing = false, outDir, onProgress } = {}) => {
 	if (!Array.isArray(files) || files.length === 0)
-		throw new Error('A list of texture files is required');
+		throw fail(CODES.INVALID_PARAMS, 'A list of texture files is required');
 
 	const formats = { png: 'PNG', webp: 'WEBP', blp: 'BLP' };
 	if (formats[format] === undefined)
-		throw new Error('Unknown texture format "' + format + '" (expected png, webp or blp)');
+		throw fail(CODES.INVALID_PARAMS, 'Unknown texture format "' + format + '" (expected png, webp or blp)');
 
-	return runJob({ outDir, config: { exportTextureFormat: formats[format], overwriteFiles: true } }, async () => {
-		const ids = files.map(file => resolveFile(file).fileDataID);
-		await require('../ui/texture-exporter').exportFiles(ids, false);
+	const config = { exportTextureFormat: formats[format], overwriteFiles: true };
+	if (channelMask !== undefined && channelMask !== null) {
+		if (!Number.isInteger(channelMask) || channelMask < 0 || channelMask > 0b1111)
+			throw fail(CODES.INVALID_PARAMS, 'channelMask must be an integer from 0 to 15');
+		config.exportChannelMask = channelMask;
+	}
 
-		return { requested: ids.length, format };
+	return runJob({ outDir, onProgress, config }, async ({ casc, job }) => {
+		let ids;
+		if (skipMissing) {
+			ids = resolveBatch(casc, files, job).map(entry => entry.fileDataID);
+		} else {
+			ids = files.map(file => resolveFile(file).fileDataID);
+		}
+
+		job.total = files.length;
+		if (ids.length > 0)
+			await require('../ui/texture-exporter').exportFiles(ids, false);
+
+		job.throwIfCancelled();
+		return { requested: files.length, format };
 	});
 };
 
 /**
- * Export a model (M2, M3 or WMO) with its textures and related files.
- * @param {object} options
- * @param {number|string} options.file
- * @param {string} [options.format=raw] raw, obj, gltf or glb.
- * @param {boolean} [options.animations=true] Include animations (raw: .anim files; gltf/glb: baked animations).
- * @param {string} [options.animationFilter] Comma separated animation IDs to include (gltf/glb only).
- * @param {string} [options.outDir]
+ * Export one model into the current job. Shared by exportModel and exportModels.
+ * @returns {Promise<{type: string, path: string}>}
  */
-const exportModel = ({ file, format = 'raw', animations = true, animationFilter = '', outDir } = {}) => {
-	if (!['raw', 'obj', 'gltf', 'glb'].includes(format))
-		throw new Error('Unknown model format "' + format + '" (expected raw, obj, gltf or glb)');
+const exportOneModel = async ({ casc, core, fileDataID, fileName, format, helper }) => {
+	const constants = require('../constants');
+	const ExportHelper = require('../casc/export-helper');
 
+	const data = await casc.getFile(fileDataID);
+	const out = ExportHelper.getExportPath(fileName);
+	const converted = (ext) => ExportHelper.replaceExtension(out, ext);
+	const manifest = [];
+
+	const magic = data.readUInt32LE();
+	data.seek(0);
+
+	let exporter;
+	let type;
+	const lowerName = fileName.toLowerCase();
+
+	if (magic === constants.MAGIC.MD21 || lowerName.endsWith('.m2')) {
+		exporter = new (require('../3D/exporters/M2Exporter'))(data, [], fileDataID);
+		type = 'm2';
+	} else if (magic === constants.MAGIC.M3DT || lowerName.endsWith('.m3')) {
+		exporter = new (require('../3D/exporters/M3Exporter'))(data, [], fileDataID);
+		type = 'm3';
+	} else if (lowerName.endsWith('.wmo')) {
+		exporter = new (require('../3D/exporters/WMOExporter'))(data, fileDataID);
+		type = 'wmo';
+	} else {
+		throw fail(CODES.UNSUPPORTED, 'Not a model file (expected .m2, .m3 or .wmo): ' + fileName);
+	}
+
+	const config = core.view.config;
+	let primary;
+
+	try {
+		if (format === 'raw') {
+			primary = out;
+			await exporter.exportRaw(out, helper, manifest);
+		} else if (format === 'obj') {
+			primary = converted('.obj');
+			if (type === 'wmo')
+				await exporter.exportAsOBJ(primary, helper, manifest, config.modelsExportSplitWMOGroups === true);
+			else
+				await exporter.exportAsOBJ(primary, config.modelsExportCollision, helper, manifest);
+		} else if (format === 'stl') {
+			primary = converted('.stl');
+			if (type === 'wmo')
+				await exporter.exportAsSTL(primary, helper, manifest);
+			else
+				await exporter.exportAsSTL(primary, config.modelsExportCollision, helper, manifest);
+		} else {
+			primary = converted('.' + format);
+			await exporter.exportAsGLTF(primary, helper, format);
+		}
+	} finally {
+		if (type === 'wmo')
+			require('../3D/exporters/WMOExporter').clearCache();
+	}
+
+	return { type, path: primary };
+};
+
+const modelConfig = ({ animations = true, animationFilter = '', textures = true, alpha, collision, uv2, splitWMOGroups, meta } = {}) => {
 	const config = {
 		overwriteFiles: true,
-		modelsExportTextures: true,
+		modelsExportTextures: textures !== false,
 		modelsExportSkin: true,
 		modelsExportSkel: true,
 		modelsExportBone: true,
@@ -354,61 +675,101 @@ const exportModel = ({ file, format = 'raw', animations = true, animationFilter 
 		modelsExportWMOGroups: true
 	};
 
-	return runJob({ outDir, config }, async ({ casc, core }) => {
-		const constants = require('../constants');
-		const ExportHelper = require('../casc/export-helper');
+	if (alpha !== undefined) config.modelsExportAlpha = !!alpha;
+	if (collision !== undefined) config.modelsExportCollision = !!collision;
+	if (uv2 !== undefined) config.modelsExportUV2 = !!uv2;
+	if (splitWMOGroups !== undefined) config.modelsExportSplitWMOGroups = !!splitWMOGroups;
+	if (meta !== undefined) {
+		config.exportM2Meta = !!meta;
+		config.exportWMOMeta = !!meta;
+	}
 
+	return config;
+};
+
+/**
+ * Export a model (M2, M3 or WMO) with its textures and related files.
+ * @param {object} options
+ * @param {number|string} options.file
+ * @param {string} [options.format=raw] raw, obj, stl, gltf or glb.
+ * @param {boolean} [options.animations=true] Include animations (raw: .anim files; gltf/glb: baked animations).
+ * @param {string} [options.animationFilter] Comma separated animation IDs to include (gltf/glb only).
+ * @param {string} [options.outDir]
+ */
+const exportModel = ({ file, format = 'raw', animations = true, animationFilter = '', outDir, onProgress, ...options } = {}) => {
+	format = lower(format, 'raw');
+	if (MODEL_FORMATS[format] === undefined)
+		throw fail(CODES.INVALID_PARAMS, 'Unknown model format "' + format + '" (expected ' + Object.keys(MODEL_FORMATS).join(', ') + ')');
+
+	const config = modelConfig({ animations, animationFilter, ...options });
+
+	return runJob({ outDir, onProgress, config }, async ({ casc, core }) => {
 		const { fileDataID, fileName } = resolveFile(file);
-		const data = await casc.getFile(fileDataID);
+		if (!inBuild(casc, fileDataID))
+			throw fail(CODES.NOT_FOUND, 'File ' + fileDataID + ' (' + fileName + ') is not in this build');
+
 		const helper = startHelper(1, 'model');
 
 		try {
-			const out = ExportHelper.getExportPath(fileName);
-			const converted = (ext) => ExportHelper.replaceExtension(out, ext);
-			const manifest = [];
-
-			const magic = data.readUInt32LE();
-			data.seek(0);
-
-			let exporter;
-			let type;
-
-			if (magic === constants.MAGIC.MD21 || fileName.endsWith('.m2')) {
-				exporter = new (require('../3D/exporters/M2Exporter'))(data, [], fileDataID);
-				type = 'm2';
-			} else if (magic === constants.MAGIC.M3DT || fileName.endsWith('.m3')) {
-				exporter = new (require('../3D/exporters/M3Exporter'))(data, [], fileDataID);
-				type = 'm3';
-			} else if (fileName.endsWith('.wmo')) {
-				exporter = new (require('../3D/exporters/WMOExporter'))(data, fileDataID);
-				type = 'wmo';
-			} else {
-				throw new Error('Not a model file (expected .m2, .m3 or .wmo): ' + fileName);
-			}
-
-			let primary;
-			if (format === 'raw') {
-				primary = out;
-				await exporter.exportRaw(out, helper, manifest);
-			} else if (format === 'obj') {
-				primary = converted('.obj');
-				if (type === 'wmo')
-					await exporter.exportAsOBJ(primary, helper, manifest);
-				else
-					await exporter.exportAsOBJ(primary, core.view.config.modelsExportCollision, helper, manifest);
-			} else {
-				primary = converted('.' + format);
-				await exporter.exportAsGLTF(primary, helper, format);
-			}
-
-			if (type === 'wmo')
-				require('../3D/exporters/WMOExporter').clearCache();
-
+			const { type, path: primary } = await exportOneModel({ casc, core, fileDataID, fileName, format, helper });
 			helper.mark(fileName, true);
 			return { fileDataID, fileName, type, format, path: primary };
 		} finally {
 			helper.finish();
 		}
+	});
+};
+
+/**
+ * Export several models (M2, M3 or WMO) with their textures and related files.
+ * Models that fail are listed in `failed`; the others are still exported.
+ * @param {object} options
+ * @param {Array<number|string>} options.files
+ * @param {string} [options.format=obj] raw, obj, stl, gltf or glb.
+ * @param {boolean} [options.textures=true]
+ * @param {boolean} [options.alpha] Keep texture alpha.
+ * @param {boolean} [options.collision] Include collision geometry (obj/stl).
+ * @param {boolean} [options.animations=true]
+ * @param {string} [options.animationFilter]
+ * @param {boolean} [options.uv2] Include the second UV set.
+ * @param {boolean} [options.splitWMOGroups] Write each WMO group to its own OBJ.
+ * @param {boolean} [options.meta] Write M2/WMO metadata JSON.
+ * @param {string} [options.outDir]
+ */
+const exportModels = ({ files, format = 'obj', outDir, onProgress, ...options } = {}) => {
+	format = lower(format, 'obj');
+	if (MODEL_FORMATS[format] === undefined)
+		throw fail(CODES.INVALID_PARAMS, 'Unknown model format "' + format + '" (expected ' + Object.keys(MODEL_FORMATS).join(', ') + ')');
+
+	const config = modelConfig(options);
+
+	return runJob({ outDir, onProgress, config }, async ({ casc, core, job }) => {
+		const resolved = resolveBatch(casc, files, job);
+		job.total = files.length;
+
+		const exported = [];
+		const helper = startHelper(resolved.length, 'model');
+
+		try {
+			// Models share texture de-duplication and WMO caches, so they run in order.
+			for (const entry of resolved) {
+				if (job.cancelled)
+					break;
+
+				try {
+					const { type, path: primary } = await exportOneModel({ casc, core, fileDataID: entry.fileDataID, fileName: entry.fileName, format, helper });
+					exported.push({ fileDataID: entry.fileDataID, fileName: entry.fileName, type, path: primary });
+					job.item(entry.fileName, true, null, null, files.length);
+				} catch (e) {
+					job.item(entry.fileName, false, e.message, e.code ?? CODES.EXPORT_FAILED, files.length);
+				}
+			}
+		} finally {
+			helper.finish();
+		}
+
+		job.throwIfCancelled();
+		return { requested: files.length, format, exported: exported.length, models: exported.slice(0, MAX_LISTED_FILES) };
 	});
 };
 
@@ -434,6 +795,9 @@ const listMaps = async ({ query } = {}) => {
 };
 
 const resolveMap = async (map) => {
+	if (map === undefined || map === null || String(map).trim() === '')
+		throw fail(CODES.INVALID_PARAMS, 'A map ID or directory name is required');
+
 	const { maps } = await listMaps();
 
 	let entry;
@@ -443,7 +807,7 @@ const resolveMap = async (map) => {
 		entry = maps.find(e => String(e.directory).toLowerCase() === String(map).toLowerCase());
 
 	if (entry === undefined)
-		throw new Error('Unknown map: ' + map + ' (use list_maps to find the map ID or directory)');
+		throw fail(CODES.NOT_FOUND, 'Unknown map: ' + map + ' (use list_maps to find the map ID or directory)');
 
 	return entry;
 };
@@ -452,7 +816,14 @@ const loadMapTiles = async (casc, map) => {
 	const WDTLoader = require('../3D/loaders/WDTLoader');
 	const dir = String(map.directory).toLowerCase();
 
-	const wdt = new WDTLoader(await casc.getFileByName(util.format('world/maps/%s/%s.wdt', dir, dir)));
+	let data;
+	try {
+		data = await casc.getFileByName(util.format('world/maps/%s/%s.wdt', dir, dir));
+	} catch (e) {
+		throw fail(CODES.NOT_FOUND, 'Map ' + map.directory + ' has no WDT in this build: ' + e.message);
+	}
+
+	const wdt = new WDTLoader(data);
 	wdt.load();
 
 	const tiles = [];
@@ -468,14 +839,41 @@ const loadMapTiles = async (casc, map) => {
 const tileName = (index) => Math.floor(index / MAP_SIZE) + '_' + (index % MAP_SIZE);
 
 const parseTile = (tile) => {
-	if (typeof tile === 'number')
+	if (typeof tile === 'number') {
+		if (!Number.isInteger(tile) || tile < 0 || tile >= MAP_SIZE * MAP_SIZE)
+			throw fail(CODES.INVALID_PARAMS, 'Invalid tile index ' + tile);
 		return tile;
+	}
 
 	const match = String(tile).match(/^(\d+)[_, ](\d+)$/);
 	if (!match || Number(match[1]) >= MAP_SIZE || Number(match[2]) >= MAP_SIZE)
-		throw new Error('Invalid tile "' + tile + '" (expected "<row>_<column>", e.g. "32_48")');
+		throw fail(CODES.INVALID_PARAMS, 'Invalid tile "' + tile + '" (expected "<row>_<column>", e.g. "32_48")');
 
 	return Number(match[1]) * MAP_SIZE + Number(match[2]);
+};
+
+/**
+ * Turn a tile selection into tile indices and check them against the map.
+ * @returns {number[]}
+ */
+const selectTiles = (tiles, available, entry) => {
+	const availableSet = new Set(available.tiles);
+
+	let selected;
+	if (tiles === 'all' || tiles === undefined || tiles === null) {
+		selected = available.tiles;
+	} else {
+		selected = [...new Set((Array.isArray(tiles) ? tiles : String(tiles).split(/[\s;]+/).filter(Boolean)).map(parseTile))];
+
+		const missing = selected.filter(index => !availableSet.has(index));
+		if (missing.length > 0)
+			throw fail(CODES.NOT_ON_MAP, 'Map ' + entry.directory + ' has no terrain tile(s): ' + missing.map(tileName).join(', ') + ' (use list_map_tiles)');
+	}
+
+	if (selected.length === 0)
+		throw fail(CODES.NOT_ON_MAP, 'Map ' + entry.directory + ' has no terrain tiles to export');
+
+	return selected;
 };
 
 /**
@@ -492,25 +890,87 @@ const listMapTiles = async ({ map } = {}) => {
 };
 
 /**
+ * Export heightmaps of terrain tiles as PNG, normalised across the selection.
+ */
+const exportHeightmaps = async ({ casc, entry, selected, resolution, bitDepth, job }) => {
+	const ADTExporter = require('../3D/exporters/ADTExporter');
+	const PNGWriter = require('../png-writer');
+	const ExportHelper = require('../casc/export-helper');
+	const { extract_height_data_from_tile, fill_heightmap_pixels } = require('../3D/heightmap');
+
+	const mapDir = String(entry.directory).toLowerCase();
+	const dir = ExportHelper.getExportPath(path.join('maps', mapDir, 'heightmaps'));
+
+	// Heights are normalised over every selected tile, so tiles line up.
+	const heights = new Map();
+	let min = Infinity;
+	let max = -Infinity;
+
+	for (const index of selected) {
+		job.throwIfCancelled();
+
+		const data = await extract_height_data_from_tile(new ADTExporter(entry.id, mapDir, index), resolution);
+		if (!data?.heights) {
+			job.item('heightmap_' + tileName(index) + '.png', false, 'no height data available', CODES.EXPORT_FAILED, selected.length);
+			continue;
+		}
+
+		for (const h of data.heights) {
+			if (h < min) min = h;
+			if (h > max) max = h;
+		}
+
+		heights.set(index, data.heights);
+	}
+
+	for (const [index, tileHeights] of heights) {
+		job.throwIfCancelled();
+
+		const file = path.join(dir, 'heightmap_' + tileName(index) + '.png');
+		try {
+			const writer = new PNGWriter(resolution, resolution);
+			fill_heightmap_pixels(writer, tileHeights, min, max - min, bitDepth);
+			await writer.write(file);
+			job.item(path.relative(dir, file), true, null, null, selected.length);
+		} catch (e) {
+			job.item(path.relative(dir, file), false, e.message, CODES.EXPORT_FAILED, selected.length);
+		}
+	}
+
+	return { path: dir, heightRange: heights.size > 0 ? { min, max } : null, resolution, bitDepth };
+};
+
+/**
  * Export terrain tiles of a map, with the models placed on them.
  * @param {object} options
  * @param {number|string} options.map Map ID or directory name.
  * @param {Array<string>|string} [options.tiles=all] Tile names ("32_48"), or "all".
- * @param {string} [options.format=raw] raw, or obj (terrain mesh without baked textures).
+ * @param {string} [options.format=raw] raw, obj (terrain mesh without baked textures) or heightmap.
  * @param {boolean} [options.models=true] Include placed M2 doodads.
  * @param {boolean} [options.wmos=true] Include placed WMOs.
  * @param {boolean} [options.foliage=true]
  * @param {boolean} [options.liquids=true]
  * @param {boolean} [options.animations=false] Include .anim files of placed models (raw only).
  * @param {boolean} [options.resume=false] Skip tiles completed by an earlier export into the same directory.
+ * @param {number} [options.heightmapResolution=256] Pixels per tile side (heightmap only).
+ * @param {number} [options.heightmapBitDepth=16] 8, 16 or 32 (heightmap only).
  * @param {string} [options.outDir]
  */
-const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = true, foliage = true, liquids = true, animations = false, resume = false, outDir } = {}) => {
-	if (format !== 'raw' && format !== 'obj')
-		throw new Error('Unknown map format "' + format + '" (expected raw or obj)');
+const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = true, foliage = true, liquids = true, animations = false, resume = false, heightmapResolution = 256, heightmapBitDepth = 16, outDir, onProgress } = {}) => {
+	format = lower(format, 'raw');
+	if (format !== 'raw' && format !== 'obj' && format !== 'heightmap')
+		throw fail(CODES.INVALID_PARAMS, 'Unknown map format "' + format + '" (expected raw, obj or heightmap)');
+
+	if (format === 'heightmap') {
+		if (!Number.isInteger(heightmapResolution) || heightmapResolution < 1 || heightmapResolution > 4096)
+			throw fail(CODES.INVALID_PARAMS, 'heightmapResolution must be an integer from 1 to 4096');
+
+		if (!HEIGHTMAP_BIT_DEPTHS.includes(heightmapBitDepth))
+			throw fail(CODES.INVALID_PARAMS, 'heightmapBitDepth must be 8, 16 or 32');
+	}
 
 	const config = {
-		exportMapFormat: format === 'raw' ? 'RAW' : 'OBJ',
+		exportMapFormat: format === 'obj' ? 'OBJ' : 'RAW',
 		overwriteFiles: !resume,
 		mapsIncludeM2: !!models,
 		mapsIncludeWMO: !!wmos,
@@ -526,28 +986,20 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 		modelsExportWMOGroups: true
 	};
 
-	return runJob({ outDir, config }, async ({ casc, core }) => {
+	return runJob({ outDir, onProgress, config }, async ({ casc, job }) => {
 		const generics = require('../generics');
 		const ExportHelper = require('../casc/export-helper');
 		const ADTExporter = require('../3D/exporters/ADTExporter');
 
 		const entry = await resolveMap(map);
 		const available = await loadMapTiles(casc, entry);
-		const availableSet = new Set(available.tiles);
+		const selected = selectTiles(tiles, available, entry);
+		job.total = selected.length;
 
-		let selected;
-		if (tiles === 'all' || tiles === undefined || tiles === null) {
-			selected = available.tiles;
-		} else {
-			selected = (Array.isArray(tiles) ? tiles : String(tiles).split(/[\s;]+/).filter(Boolean)).map(parseTile);
-
-			const missing = selected.filter(index => !availableSet.has(index));
-			if (missing.length > 0)
-				throw new Error('Map ' + entry.directory + ' has no tile(s): ' + missing.map(tileName).join(', '));
+		if (format === 'heightmap') {
+			const result = await exportHeightmaps({ casc, entry, selected, resolution: heightmapResolution, bitDepth: heightmapBitDepth, job });
+			return Object.assign({ map: entry, format, tilesRequested: selected.length, tilesExported: selected.length - job.failed.length }, result);
 		}
-
-		if (selected.length === 0)
-			throw new Error('Map ' + entry.directory + ' has no terrain tiles to export');
 
 		const mapDir = String(entry.directory).toLowerCase();
 		const dir = ExportHelper.getExportPath(path.join('maps', mapDir));
@@ -556,7 +1008,7 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 
 		// Resuming relies on a record of completed tiles kept beside the export.
 		const stateFile = path.join(dir, '.wow_export_tiles.json');
-		const signature = format + ':' + (casc.build?.BuildConfig ?? '') + ':' + [models, wmos, foliage, liquids, animations].map(e => e ? 1 : 0).join('');
+		const signature = format + ':' + (casc.build?.BuildConfig ?? casc.build?.BuildKey ?? '') + ':' + [models, wmos, foliage, liquids, animations].map(e => e ? 1 : 0).join('');
 
 		let completed = new Set();
 		if (resume) {
@@ -586,10 +1038,13 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 					return;
 				}
 
+				if (job.cancelled)
+					return;
+
 				try {
 					const out = await new ADTExporter(entry.id, mapDir, index).export(dir, 0, undefined, helper);
 					if (!out)
-						throw new Error('export was cancelled');
+						throw fail(CODES.CANCELLED, 'export was cancelled');
 
 					helper.mark(tileName(index), true);
 					completed.add(index);
@@ -599,6 +1054,9 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 						await saveState();
 					}
 				} catch (e) {
+					if (job.cancelled)
+						return;
+
 					failed.push({ tile: tileName(index), error: e.message });
 					helper.mark(tileName(index), false, e.message);
 				}
@@ -610,6 +1068,8 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 			helper.finish();
 		}
 
+		job.throwIfCancelled();
+
 		return {
 			map: entry,
 			format,
@@ -619,6 +1079,171 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 			tilesFailed: failed,
 			path: dir
 		};
+	});
+};
+
+// --- database tables -------------------------------------------------------
+
+let tableNames = null;
+
+/**
+ * Names of the DB2 tables with known definitions.
+ * @returns {Promise<string[]>}
+ */
+const getTableNames = async () => {
+	if (tableNames === null || tableNames.length === 0) {
+		const manifest = require('../casc/dbd-manifest');
+		await manifest.prepareManifest();
+		tableNames = manifest.getAllTableNames();
+	}
+
+	return tableNames;
+};
+
+/**
+ * Resolve a table name (any case) to the name the definitions use.
+ * @param {string} table
+ * @returns {Promise<string>}
+ */
+const resolveTable = async (table) => {
+	if (typeof table !== 'string' || !/^[A-Za-z0-9_]+$/.test(table))
+		throw fail(CODES.INVALID_PARAMS, 'A table name is required (letters, digits and underscores only)');
+
+	const names = await getTableNames();
+	if (names.includes(table))
+		return table;
+
+	const match = names.find(name => name.toLowerCase() === table.toLowerCase());
+	if (match !== undefined)
+		return match;
+
+	// Without a definitions manifest, fall back to the listfile.
+	const listfile = require('../casc/listfile');
+	if (names.length === 0 && listfile.getByFilename('dbfilesclient/' + table.toLowerCase() + '.db2') > 0)
+		return table;
+
+	throw fail(CODES.NOT_FOUND, 'Unknown table: ' + table + ' (use list_tables to find table names)');
+};
+
+/**
+ * List DB2 table names.
+ * @param {object} [options]
+ * @param {string} [options.query] Only tables whose name contains this text.
+ */
+const listTables = async ({ query } = {}) => {
+	await open();
+
+	const needle = typeof query === 'string' && query.length > 0 ? query.toLowerCase() : null;
+	const names = (await getTableNames()).filter(name => needle === null || name.toLowerCase().includes(needle));
+	return { count: names.length, tables: names };
+};
+
+const describeType = (schemaType) => {
+	const [symbol, arrayLength] = Array.isArray(schemaType) ? schemaType : [schemaType, 0];
+	const type = String(symbol?.description ?? symbol).replace(/^dbField/, '');
+	return arrayLength > 0 ? { type, arrayLength } : { type };
+};
+
+/**
+ * Describe a DB2 table: its columns and row count.
+ * @param {object} options
+ * @param {string} options.table
+ */
+const describeTable = async ({ table } = {}) => {
+	await open();
+
+	const name = await resolveTable(table);
+	const WDCReader = require('../db/WDCReader');
+	const reader = new WDCReader('DBFilesClient/' + name + '.db2');
+
+	try {
+		await reader.parse();
+	} catch (e) {
+		throw fail(CODES.EXPORT_FAILED, 'Unable to read table ' + name + ': ' + e.message);
+	}
+
+	// Columns in the order CSV and SQL exports use: ID first.
+	const columns = [...reader.schema.entries()].map(([column, type]) => Object.assign({ name: column }, describeType(type)));
+	const idIndex = columns.findIndex(column => column.name.toUpperCase() === 'ID');
+	if (idIndex > 0)
+		columns.unshift(columns.splice(idIndex, 1)[0]);
+
+	return { table: name, rowCount: reader.size, columnCount: columns.length, columns };
+};
+
+/**
+ * Export DB2 tables as CSV, SQL or the raw DB2 file.
+ * @param {object} options
+ * @param {string[]} options.tables
+ * @param {string} [options.format=csv] csv, sql or db2.
+ * @param {boolean} [options.sqlCreateTable=true] Include DROP/CREATE TABLE statements (sql only).
+ * @param {string} [options.outDir]
+ */
+const exportTable = ({ tables, format = 'csv', sqlCreateTable = true, outDir, onProgress } = {}) => {
+	format = lower(format, 'csv');
+	if (TABLE_FORMATS[format] === undefined)
+		throw fail(CODES.INVALID_PARAMS, 'Unknown table format "' + format + '" (expected csv, sql or db2)');
+
+	if (typeof tables === 'string')
+		tables = [tables];
+
+	if (!Array.isArray(tables) || tables.length === 0)
+		throw fail(CODES.INVALID_PARAMS, 'A list of table names is required');
+
+	return runJob({ outDir, onProgress, config: { overwriteFiles: true } }, async ({ job }) => {
+		const parse_table = require('../db/parse-table');
+		const dataExporter = require('../ui/data-exporter');
+		const manifest = require('../casc/dbd-manifest');
+		const ExportHelper = require('../casc/export-helper');
+
+		job.total = tables.length;
+		const exported = [];
+
+		for (const table of tables) {
+			if (job.cancelled)
+				break;
+
+			let name;
+			try {
+				name = await resolveTable(table);
+			} catch (e) {
+				job.item(String(table), false, e.message, e.code ?? CODES.NOT_FOUND, tables.length);
+				continue;
+			}
+
+			const helper = new ExportHelper(1, 'table');
+			const failedBefore = job.failed.length;
+
+			try {
+				if (format === 'db2') {
+					const fileDataID = manifest.getByTableName(name) ?? require('../casc/listfile').getByFilename('dbfilesclient/' + name.toLowerCase() + '.db2');
+					if (!(fileDataID > 0))
+						throw fail(CODES.NOT_FOUND, 'No DB2 file known for table ' + name);
+
+					await dataExporter.exportRawDB2(name, fileDataID, { helper });
+				} else {
+					const { headers, rows, schema } = await parse_table(name);
+					if (rows.length === 0) {
+						job.item(name, false, 'table has no rows', CODES.NOT_FOUND, tables.length);
+						continue;
+					}
+
+					if (format === 'csv')
+						await dataExporter.exportDataTable(headers, rows, name, { helper });
+					else
+						await dataExporter.exportDataTableSQL(headers, rows, name, schema, sqlCreateTable !== false, { helper });
+				}
+
+				// The data exporter reports through helper.mark(), which records progress and failures.
+				if (job.failed.length === failedBefore)
+					exported.push({ table: name, file: name + '.' + format });
+			} catch (e) {
+				job.item(name, false, e.message, e.code ?? CODES.EXPORT_FAILED, tables.length);
+			}
+		}
+
+		job.throwIfCancelled();
+		return { requested: tables.length, format, exported: exported.length, tables: exported };
 	});
 };
 
@@ -634,50 +1259,66 @@ const exportMap = ({ map, tiles = 'all', format = 'raw', models = true, wmos = t
 const queryTable = async ({ table, id, where, limit = 50, offset = 0 } = {}) => {
 	await open();
 
-	if (typeof table !== 'string' || !/^[A-Za-z0-9_]+$/.test(table))
-		throw new Error('A table name is required (letters, digits and underscores only)');
-
+	const name = await resolveTable(table);
 	const db2 = require('../casc/db2');
-	const reader = db2[table];
+	const reader = db2[name];
 
 	const serialise = (row) => JSON.parse(JSON.stringify(row, (key, value) => typeof value === 'bigint' ? value.toString() : value));
 
-	if (id !== undefined && id !== null) {
-		const row = await reader.getRow(Number(id));
-		return { table, total: row ? 1 : 0, count: row ? 1 : 0, rows: row ? [Object.assign({ ID: Number(id) }, serialise(row))] : [] };
+	if (where !== undefined && where !== null && (typeof where !== 'object' || Array.isArray(where)))
+		throw fail(CODES.INVALID_PARAMS, 'where must be an object of column/value pairs');
+
+	try {
+		if (id !== undefined && id !== null) {
+			const row = await reader.getRow(Number(id));
+			return { table: name, total: row ? 1 : 0, count: row ? 1 : 0, rows: row ? [Object.assign({ ID: Number(id) }, serialise(row))] : [] };
+		}
+
+		limit = Math.max(1, Math.min(1000, Number(limit) || 50));
+		offset = Math.max(0, Number(offset) || 0);
+
+		const conditions = Object.entries(where ?? {});
+		const rows = [];
+		let total = 0;
+
+		for (const [rowID, row] of await reader.getAllRows()) {
+			// Loose comparison so that "5" matches 5 when filters arrive as strings.
+			if (!conditions.every(([column, value]) => row[column] == value))
+				continue;
+
+			if (total >= offset && rows.length < limit)
+				rows.push(Object.assign({ ID: rowID }, serialise(row)));
+
+			total++;
+		}
+
+		return { table: name, total, offset, count: rows.length, rows };
+	} catch (e) {
+		if (e.code !== undefined && CODES[e.code] !== undefined)
+			throw e;
+
+		throw fail(CODES.EXPORT_FAILED, 'Unable to read table ' + name + ': ' + e.message);
 	}
-
-	limit = Math.max(1, Math.min(1000, Number(limit) || 50));
-	offset = Math.max(0, Number(offset) || 0);
-
-	const conditions = Object.entries(where ?? {});
-	const rows = [];
-	let total = 0;
-
-	for (const [rowID, row] of await reader.getAllRows()) {
-		// Loose comparison so that "5" matches 5 when filters arrive as strings.
-		if (!conditions.every(([column, value]) => row[column] == value))
-			continue;
-
-		if (total >= offset && rows.length < limit)
-			rows.push(Object.assign({ ID: rowID }, serialise(row)));
-
-		total++;
-	}
-
-	return { table, total, offset, count: rows.length, rows };
 };
 
 module.exports = {
 	open,
 	info,
 	search,
+	fileInfo,
 	getFile,
+	exportFiles,
 	exportTextures,
 	exportModel,
+	exportModels,
 	listMaps,
 	listMapTiles,
 	exportMap,
+	listTables,
+	describeTable,
+	exportTable,
 	queryTable,
+	cancel,
+	isBusy,
 	getDefaultOutputDirectory
 };
