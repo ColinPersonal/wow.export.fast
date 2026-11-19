@@ -28,7 +28,7 @@ at the end of every phase.
 | 3 MCP layer | done | service/src/tools.js, stateless Streamable HTTP; instructions for agents |
 | 4 Phase-1 exports | done | e2e with real wowf engines (service/test-e2e/run.js): 24/24 on a clean root - search, tables, textures, GLB/OBJ/WMO, CSV, raw files, map raw + OBJ tiles, download script, zip, quick lane under bulk load, 5 concurrent agents |
 | 5 Supervision | done | 43 gateway tests (adds moveDir retry tests) |
-| 6 Startup + tunnel | started | 2026-11-19: scheduled task `wow-export-service` registered from C:\Repos\wow.export.fast\service and running; gateway healthy on 127.0.0.1:8787 with warm wowf engines; `cloud-agents` token created (kept in ~/wow.export-service, not in the repo); publicUrl set to https://colinf.tailc80785.ts.net. Waiting on the user to enable Funnel for the tailnet before `tailscale funnel --bg 8787` |
+| 6 Startup + tunnel | done | 2026-11-19: scheduled task `wow-export-service` registered from C:\Repos\wow.export.fast\service and running; gateway healthy on 127.0.0.1:8787 with warm wowf engines; `cloud-agents` token created (kept in ~/wow.export-service, not in the repo); publicUrl https://colinf.tailc80785.ts.net. Funnel on (`tailscale funnel --bg 8787`). Checked through the public Funnel IPs: /health ok, /mcp without or with a bad token 401, `search` with the cloud token returns results; 22 tools listed. Funnel config survived `tailscale down`/`up` (restarting the Tailscale service needs admin, not tried) |
 | 7 Phase-2 exports | pending | |
 | 8 Remote QA | pending | |
 | 9 Soak + report | pending | |
