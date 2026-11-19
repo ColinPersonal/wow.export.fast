@@ -23,7 +23,10 @@
 		"bench": "node bench/run.js",
 		"bench:quick": "node bench/run.js --quick",
 		"bench:profiles": "node bench/export-profiles.js",
-		"test:exports": "node tests/export-scale/run.js"
+		"test:exports": "node tests/export-scale/run.js",
+		"bench:outputs": "bun bench/output-manifest.js",
+		"headless": "bun src/js/headless/cli.js",
+		"mcp": "bun src/js/headless/cli.js mcp"
 	},
 	"dependencies": {
 		"adm-zip": "git+https://github.com/cthackers/adm-zip.git#1c7860ff5005cd30bf5dc6e557c9b312fedc0a66",

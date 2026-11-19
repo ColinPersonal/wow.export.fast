@@ -8,7 +8,7 @@ const PNGWriter = require('../png-writer');
 const perf = require('../perf');
 const workerPool = require('../worker-pool');
 const blpDecode = require('./blp-decode');
-const webp = require('webp-wasm');
+const webp = require('../webp');
 
 const BLP_MAGIC = 0x32504c42;
 

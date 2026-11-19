@@ -169,6 +169,18 @@ class BLTEReader extends BufferWrapper {
 	}
 
 	/**
+	 * The decoded contents as a raw buffer.
+	 * Blocks are decoded lazily as they are read, so anything reaching for the
+	 * underlying buffer directly (bulk decoders, fast paths) must see the whole
+	 * file decoded first; otherwise it would read not-yet-decoded bytes.
+	 * @returns {Buffer}
+	 */
+	get raw() {
+		this.processAllBlocks();
+		return this._buf;
+	}
+
+	/**
 	 * Process all BLTE blocks in the reader.
 	 */
 	processAllBlocks() {

@@ -142,7 +142,32 @@ const readJSON = async (file, ignoreComments = false) => {
 	}
 };
 
+/**
+ * Variant of requestData() built on fetch(). Unlike the http/https modules,
+ * fetch honours proxy environment variables, which headless runs inside
+ * sandboxed/cloud environments depend on.
+ */
+async function requestDataFetch(url, partialOfs, partialLen) {
+	const headers = { 'User-Agent': constants.USER_AGENT };
+	if (partialOfs > -1 && partialLen > -1)
+		headers.Range = `bytes=${partialOfs}-${partialOfs + partialLen - 1}`;
+
+	log.write('Requesting data from %s (offset: %d, length: %d)', url, partialOfs, partialLen);
+
+	const res = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(60000) });
+	if (!res.ok)
+		throw new Error(`Status Code: ${res.status}`);
+
+	const data = Buffer.from(await res.arrayBuffer());
+	log.write('Download complete: %d bytes received', data.length);
+
+	return data;
+}
+
 function requestData(url, partialOfs, partialLen) {
+	if (globalThis.WOW_EXPORT_HEADLESS)
+		return requestDataFetch(url, partialOfs, partialLen);
+
 	return new Promise((resolve, reject) => {
 		const options = {
 			headers: {

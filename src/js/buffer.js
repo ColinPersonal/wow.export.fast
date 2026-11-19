@@ -9,7 +9,7 @@ const zlib = require('zlib');
 const path = require('path');
 const crc32 = require('./crc32');
 const fsp = require('fs').promises;
-const webp = require('webp-wasm');
+const webp = require('./webp');
 const perf = require('./perf');
 
 // Directories known to exist, so we don't issue a recursive mkdir for every file written.

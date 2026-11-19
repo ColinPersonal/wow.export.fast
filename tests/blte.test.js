@@ -136,3 +136,18 @@ test('BLTEReader.fromDecoded wraps worker output as a readable buffer', async ()
 after(() => {
 	// Workers are unref()'d, so the process can exit without explicit cleanup.
 });
+
+test('raw buffer access decodes every block first', () => {
+	// Bulk decoders read the underlying buffer directly; they must never see
+	// blocks that have not been decoded yet.
+	const payload = Buffer.concat([Buffer.alloc(6000, 0x11), Buffer.alloc(6000, 0x22)]);
+	const { data, hash: key } = makeBLTE(payload, { blocks: 2 });
+
+	const reader = new BLTEReader(new BufferWrapper(Buffer.from(data)), key);
+	assert.equal(reader.readUInt8(), 0x11, 'reading the first byte only needs the first block');
+	assert.equal(reader.blockIndex, 1, 'the second block has not been decoded yet');
+
+	const raw = reader.raw;
+	assert.equal(reader.blockIndex, 2, 'taking the raw buffer decodes the rest');
+	assert.ok(raw.equals(payload));
+});
