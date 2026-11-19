@@ -86,6 +86,23 @@ node bench/export-profiles.js --save "before change"
 node bench/export-profiles.js --history
 ```
 
+### Full tile export tests
+
+These export real map tiles from a local WoW installation using a built wow.export (`bun ./build.js win-x64` first), then check the output and report timings. They are separate from `npm test` because they need the game and take minutes to hours.
+
+```
+# One tile in each format (a few minutes, mostly first-run setup).
+npm run test:exports
+
+# 16 tiles per format, with models, WMOs, foliage and liquids.
+npm run test:exports -- --suite standard
+
+# 100 baked tiles and 400 raw tiles; large output. --clean removes exports afterwards.
+npm run test:exports -- --suite scale --clean
+```
+
+The app runs in a headless test mode with its own data directory, so it can run while you use wow.export normally and never changes your settings, runtime log or export folder. Everything goes under `~/wow.export-tests`: `runs/<run>/` holds each run's exports, `report.json` and `runtime.log`, and `history.jsonl` keeps every run's timings so each run is compared with the previous one of the same suite. The install and product default to the ones you last opened in wow.export; use `--install` and `--product` to choose others. Suites are JSON files in `tests/export-scale/suites/`; tiles are named like their ADT files (`"32_48"`), as lists, `{ "from": "31_47", "to": "34_50" }` ranges, or `"all"`.
+
 ## Debugging (Developers Only)
 > **Note**: Debugging is currently only supported on Windows.
 

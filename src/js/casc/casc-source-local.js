@@ -347,13 +347,29 @@ class CASCLocal extends CASC {
 	 * files needed during local initialization.
 	 */
 	async initializeRemoteCASC() {
-		const remote = new CASCRemote(core.view.selectedCDNRegion.tag);
-		await remote.init();
+		// Exports fetch many files concurrently. Without sharing one in-flight
+		// initialisation, every concurrent CDN fallback started its own and each
+		// downloaded and parsed every archive index (thousands of files), which
+		// could exhaust memory and crash the app on a cold cache.
+		if (this.remote)
+			return;
 
-		const buildIndex = remote.builds.findIndex(build => build?.Product === this.build.Product);
-		await remote.preload(buildIndex, this.cache);
+		if (!this._remoteInit) {
+			this._remoteInit = (async () => {
+				const remote = new CASCRemote(core.view.selectedCDNRegion.tag);
+				await remote.init();
 
-		this.remote = remote;
+				const buildIndex = remote.builds.findIndex(build => build?.Product === this.build.Product);
+				await remote.preload(buildIndex, this.cache);
+
+				this.remote = remote;
+			})();
+
+			// Allow a later call to retry if initialisation failed.
+			this._remoteInit.catch(() => {}).finally(() => { this._remoteInit = null; });
+		}
+
+		await this._remoteInit;
 	}
 
 	/**

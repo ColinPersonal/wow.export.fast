@@ -65,9 +65,10 @@ class CSVWriter {
 
 		await generics.createDirectory(path.dirname(this.out));
 		const writer = new FileWriter(this.out);
+		const out = new FileWriter.LineBuffer(writer);
 
 		// Write header.
-		await writer.writeLine(this.fields.map(field => this.escapeCSVField(field)).join(';'));
+		out.push(this.fields.map(field => this.escapeCSVField(field)).join(';'));
 
 		// Write rows.
 		const nFields = this.fields.length;
@@ -76,10 +77,11 @@ class CSVWriter {
 			for (let i = 0; i < nFields; i++)
 				rowOut[i] = this.escapeCSVField(row[this.fields[i]]);
 
-			await writer.writeLine(rowOut.join(';'));
+			if (out.push(rowOut.join(';')))
+				await out.flush();
 		}
 
-		// Wait for the file to be fully written before reporting it as done.
+		await out.flush();
 		await writer.close();
 	}
 }

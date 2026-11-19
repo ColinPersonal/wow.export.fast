@@ -1,0 +1,8 @@
+{
+	"description": "One tile as plain OBJ, one baked, one raw. A quick check that tile exports work end to end.",
+	"jobs": [
+		{ "name": "obj-plain", "map": "azeroth", "format": "OBJ", "quality": 0, "tiles": ["32_48"] },
+		{ "name": "obj-baked", "map": "azeroth", "format": "OBJ", "quality": 1024, "tiles": ["32_48"] },
+		{ "name": "raw", "map": "azeroth", "format": "RAW", "tiles": ["32_48"] }
+	]
+}

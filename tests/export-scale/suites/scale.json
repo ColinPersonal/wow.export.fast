@@ -1,0 +1,13 @@
+{
+	"description": "Large exports: a 10x10 block (100 tiles) baked to OBJ with models, and 400 tiles raw. Expect tens of GB of output and a long run.",
+	"config": {
+		"mapsIncludeM2": true,
+		"mapsIncludeWMO": true,
+		"mapsIncludeFoliage": false,
+		"mapsIncludeLiquid": true
+	},
+	"jobs": [
+		{ "name": "obj-baked-100", "map": "azeroth", "format": "OBJ", "quality": 1024, "tiles": { "from": "28_44", "to": "37_53" } },
+		{ "name": "raw-400", "map": "azeroth", "format": "RAW", "tiles": { "from": "24_40", "to": "43_59" } }
+	]
+}

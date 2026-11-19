@@ -18,9 +18,13 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { Suite, fmtBytes } = require('./harness');
-const { makeImage, makeBLTE, ownedCopy, decodePNG, rng } = require('../tests/helpers/fixtures');
+const { makeImage, makeBLTE, ownedCopy, decodePNG, rng, makeBLP } = require('../tests/helpers/fixtures');
 
 const pngEncode = require('../src/js/png-encode');
+const BLPImage = require('../src/js/casc/blp');
+const OBJWriter = require('../src/js/3D/writers/OBJWriter');
+const generics = require('../src/js/generics');
+const os = require('os');
 const workerPool = require('../src/js/worker-pool');
 const exportSession = require('../src/js/export-session');
 const BufferWrapper = require('../src/js/buffer');
@@ -176,6 +180,63 @@ const benchBLTE = async (suite, args) => {
 		{ bytes: count * size, items: count });
 };
 
+const benchBLP = async (suite, args) => {
+	const openBLP = (file) => new BLPImage(new BufferWrapper(Buffer.from(file)));
+
+	suite.heading('BLP decode (main thread)');
+	const sizes = args.quick ? [1024] : [512, 2048];
+	for (const size of sizes) {
+		for (const format of ['dxt1', 'dxt5', 'bgra']) {
+			const file = makeBLP(size, size, { format, texture: true });
+			await suite.add('blp', `${format} ${size}x${size}`, () => openBLP(file).toUInt8Array(0), { bytes: size * size * 4 });
+		}
+	}
+
+	// The texture export path: decode + PNG encode for a batch, at the export
+	// concurrency the app uses. "worker" sends compressed data to a worker that
+	// decodes and encodes; "main decode" decodes here and encodes on a worker
+	// (the previous pipeline).
+	const count = args.quick ? 8 : 32;
+	const size = 2048;
+	const files = Array.from({ length: count }, (_, i) => makeBLP(size, size, { format: 'dxt5', texture: true, seed: i + 1 }));
+	suite.heading(`Texture export pipeline: ${count} x ${size}x${size} DXT5 -> PNG, concurrency 8`);
+
+	await suite.add('blp-batch', `main decode, worker encode (${count})`,
+		() => generics.queue(files, async (f) => { await openBLP(f)._toPNGWriter(0b1111).getBufferAsync(); }, 8),
+		{ items: count });
+
+	await suite.add('blp-batch', `worker decode + encode (${count})`,
+		() => generics.queue(files, async (f) => {
+			const blp = openBLP(f);
+			blp._prepare(0);
+			await workerPool.encodeBLP(blp.rawData, blp._decodeInfo(), 0b1111, true);
+		}, 8),
+		{ items: count });
+};
+
+const benchOBJ = async (suite, args) => {
+	// One ADT tile worth of terrain: 256 chunks x 145 vertices, 256 x 256 triangles.
+	const verts = 256 * 145, tris = 256 * 256;
+	const rand = rng(77);
+	const positions = Array.from(new Float32Array(verts * 3).map(() => rand() * 1000 - 500));
+	const normals = Array.from(new Float32Array(verts * 3).map(() => rand() * 2 - 1));
+	const uvs = Array.from(new Float32Array(verts * 2).map(() => rand()));
+	const indices = Array.from({ length: tris * 3 }, () => (rand() * verts) | 0);
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wowexport-bench-'));
+
+	suite.heading('OBJ writing');
+	await suite.add('obj', `one ADT tile (${verts} verts, ${tris} tris)`, async () => {
+		const obj = new OBJWriter(path.join(dir, 'tile.obj'));
+		obj.setVertArray(positions);
+		obj.setNormalArray(normals);
+		obj.addUVArray(uvs);
+		obj.addMesh('terrain', indices, 'tex');
+		await obj.write();
+	}, { items: 1 });
+
+	fs.rmSync(dir, { recursive: true, force: true });
+};
+
 const benchSession = async (suite, args) => {
 	const n = args.quick ? 2000 : 10000;
 	suite.heading(`Export session overhead (${n} calls)`);
@@ -229,6 +290,8 @@ const keepAlive = setInterval(() => {}, 1 << 30);
 	await benchPNG(suite, args);
 	await benchWorkersPNG(suite, args);
 	await benchBLTE(suite, args);
+	await benchBLP(suite, args);
+	await benchOBJ(suite, args);
 	await benchSession(suite, args);
 
 	if (args.save)

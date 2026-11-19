@@ -4,13 +4,15 @@
  */
 
 // Export worker thread. Performs CPU-heavy, self-contained work for the main
-// thread: PNG encoding and BLTE (CASC) block verification/decompression.
+// thread: PNG encoding, BLP decoding and BLTE (CASC) block
+// verification/decompression.
 // This file is shipped as-is in release builds (it is not bundled), so it may
 // only depend on node built-ins and other files shipped alongside it.
 const { parentPort } = require('worker_threads');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const pngEncode = require('../png-encode');
+const blpDecode = require('../casc/blp-decode');
 
 const BLTE_MAGIC = 0x45544c42;
 const EMPTY_HASH = '00000000000000000000000000000000';
@@ -111,6 +113,16 @@ parentPort.on('message', (msg) => {
 			const encoded = pngEncode.encode(msg.pixels, msg.width, msg.height, msg.fast);
 
 			// Copy into a dedicated ArrayBuffer (the encoder's buffer may be pooled).
+			const out = new Uint8Array(encoded.length);
+			out.set(encoded);
+
+			parentPort.postMessage({ id: msg.id, ok: true, data: out }, [out.buffer]);
+		} else if (msg.type === 'blp') {
+			const { info } = msg;
+			const pixels = Buffer.alloc(info.width * info.height * 4);
+			blpDecode.decode(msg.raw, info, msg.mask, pixels);
+
+			const encoded = pngEncode.encode(pixels, info.width, info.height, msg.fast);
 			const out = new Uint8Array(encoded.length);
 			out.set(encoded);
 

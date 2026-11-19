@@ -2,6 +2,7 @@ const log = require('../log');
 const util = require('util');
 const path = require('path');
 const ExportHelper = require('../casc/export-helper');
+const generics = require('../generics');
 const listfile = require('../casc/listfile');
 const EncryptionError = require('../casc/blte-reader').EncryptionError;
 const InstallType = require('../install-type');
@@ -206,9 +207,15 @@ const export_files = async (core, files, is_local = false, export_id = -1) => {
 	const helper = new ExportHelper(files.length, 'model');
 	helper.start();
 
-	for (const file_entry of files) {
+	// Models export several at a time. Each one may run its own texture and
+	// doodad queues, so this stays below the overall export concurrency.
+	// Manifest entries are collected by position to keep the original order.
+	const results = new Array(files.length);
+	const model_concurrency = Math.min(4, ExportHelper.getConcurrency());
+
+	await generics.queue(files.map((file_entry, index) => ({ file_entry, index })), async ({ file_entry, index }) => {
 		if (helper.isCancelled())
-			break;
+			return;
 
 		let file_name;
 		let file_data_id;
@@ -272,11 +279,16 @@ const export_files = async (core, files, is_local = false, export_id = -1) => {
 			});
 
 			helper.mark(mark_name, true);
-			manifest.succeeded.push({ fileDataID: file_data_id, files: file_manifest });
+			results[index] = { ok: true, entry: { fileDataID: file_data_id, files: file_manifest } };
 		} catch (e) {
 			helper.mark(file_name, false, e.message, e.stack);
-			manifest.failed.push({ fileDataID: file_data_id });
+			results[index] = { ok: false, entry: { fileDataID: file_data_id } };
 		}
+	}, model_concurrency);
+
+	for (const result of results) {
+		if (result !== undefined)
+			(result.ok ? manifest.succeeded : manifest.failed).push(result.entry);
 	}
 
 	helper.finish();

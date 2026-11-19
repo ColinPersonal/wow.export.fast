@@ -715,6 +715,15 @@ document.addEventListener('click', function(e) {
 		}
 	})();
 
+	// Headless export tests (--export-test=<job.json>): run the job and exit.
+	const exportTestRunner = require('./js/export-test-runner');
+	const exportTestJob = exportTestRunner.getJobPath();
+	if (exportTestJob !== null) {
+		log.write('Running export test job %s', exportTestJob);
+		exportTestRunner.run(core, exportTestJob);
+		return;
+	}
+
 	// Set source select as the currently active interface screen.
 	modules.source_select.setActive();
 })();

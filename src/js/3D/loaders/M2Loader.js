@@ -254,41 +254,30 @@ class M2Loader {
 			const translations = bone.translation.values[animIndex];
 			if (translations) {
 				for (let j = 0; j < translations.length; j++) {
-					const dx = translations[j][0];
-					const dy = translations[j][1];
-					const dz = translations[j][2];
-
-					translations[j][0] = dx;
-					translations[j][2] = dy * -1;
-					translations[j][1] = dz;
+					const v = translations[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			const rotations = bone.rotation.values[animIndex];
 			if (rotations) {
 				for (let j = 0; j < rotations.length; j++) {
-					const dx = rotations[j][0];
-					const dy = rotations[j][1];
-					const dz = rotations[j][2];
-					const dw = rotations[j][3];
-
-					rotations[j][0] = dx;
-					rotations[j][2] = dy * -1;
-					rotations[j][1] = dz;
-					rotations[j][3] = dw;
+					const v = rotations[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			const scale = bone.scale.values[animIndex];
 			if (scale) {
 				for (let j = 0; j < scale.length; j++) {
-					const dx = scale[j][0];
-					const dy = scale[j][1];
-					const dz = scale[j][2];
-
-					scale[j][0] = dx;
-					scale[j][2] = dy;
-					scale[j][1] = dz;
+					const v = scale[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy;
 				}
 			}
 		}
@@ -434,41 +423,34 @@ class M2Loader {
 			const scale = bone.scale.values;
 			const pivot = bone.pivot;
 
+			// (x, y, z) -> (x, z, -y) for translations/rotations, (x, z, y) for scale.
 			for (let i = 0; i < translations.length; i++) {
-				for (let j = 0; j < translations[i].length; j++) {
-					const dx = translations[i][j][0];
-					const dy = translations[i][j][1];
-					const dz = translations[i][j][2];
-
-					translations[i][j][0] = dx;
-					translations[i][j][2] = dy * -1;
-					translations[i][j][1] = dz;
+				const keys = translations[i];
+				for (let j = 0; j < keys.length; j++) {
+					const v = keys[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			for (let i = 0; i < rotations.length; i++) {
-				for (let j = 0; j < rotations[i].length; j++) {
-					const dx = rotations[i][j][0];
-					const dy = rotations[i][j][1];
-					const dz = rotations[i][j][2];
-					const dw = rotations[i][j][3];
-
-					rotations[i][j][0] = dx;
-					rotations[i][j][2] = dy * -1;
-					rotations[i][j][1] = dz;
-					rotations[i][j][3] = dw;
+				const keys = rotations[i];
+				for (let j = 0; j < keys.length; j++) {
+					const v = keys[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			for (let i = 0; i < scale.length; i++) {
-				for (let j = 0; j < scale[i].length; j++) {
-					const dx = scale[i][j][0];
-					const dy = scale[i][j][1];
-					const dz = scale[i][j][2];
-
-					scale[i][j][0] = dx;
-					scale[i][j][2] = dy;
-					scale[i][j][1] = dz;
+				const keys = scale[i];
+				for (let j = 0; j < keys.length; j++) {
+					const v = keys[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy;
 				}
 			}
 
@@ -666,7 +648,46 @@ class M2Loader {
 		const uv2 = this.uv2 = new Array(verticesCount * 2);
 		const boneWeights = this.boneWeights = Array(verticesCount * 4);
 		const boneIndices = this.boneIndices = Array(verticesCount * 4);
-	
+
+		// Each vertex is 48 bytes: position (3f), bone weights (4b), bone indices (4b),
+		// normal (3f), uv (2f), uv2 (2f). When the whole block is in bounds, decode it
+		// straight from the raw buffer; otherwise fall back to per-field reads so a
+		// truncated file fails exactly as before.
+		const raw = this.data.raw;
+		const start = this.data.offset;
+		if (this.data.remainingBytes >= verticesCount * 48 && start === Math.floor(start)) {
+			const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+
+			for (let i = 0, p = start; i < verticesCount; i++, p += 48) {
+				vertices[i * 3] = view.getFloat32(p, true);
+				vertices[i * 3 + 2] = view.getFloat32(p + 4, true) * -1;
+				vertices[i * 3 + 1] = view.getFloat32(p + 8, true);
+
+				boneWeights[i * 4] = raw[p + 12];
+				boneWeights[i * 4 + 1] = raw[p + 13];
+				boneWeights[i * 4 + 2] = raw[p + 14];
+				boneWeights[i * 4 + 3] = raw[p + 15];
+
+				boneIndices[i * 4] = raw[p + 16];
+				boneIndices[i * 4 + 1] = raw[p + 17];
+				boneIndices[i * 4 + 2] = raw[p + 18];
+				boneIndices[i * 4 + 3] = raw[p + 19];
+
+				normals[i * 3] = view.getFloat32(p + 20, true);
+				normals[i * 3 + 2] = view.getFloat32(p + 24, true) * -1;
+				normals[i * 3 + 1] = view.getFloat32(p + 28, true);
+
+				uv[i * 2] = view.getFloat32(p + 32, true);
+				uv[i * 2 + 1] = view.getFloat32(p + 36, true);
+
+				uv2[i * 2] = view.getFloat32(p + 40, true);
+				uv2[i * 2 + 1] = view.getFloat32(p + 44, true);
+			}
+
+			this.data.seek(base);
+			return;
+		}
+
 		for (let i = 0; i < verticesCount; i++) {
 			vertices[i * 3] = this.data.readFloatLE();
 			vertices[i * 3 + 2] = this.data.readFloatLE() * -1;

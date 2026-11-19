@@ -980,12 +980,10 @@ class GLTFWriter {
 			accessor.count = arr.length / stride;
 
 			calculate_min_max(arr, stride, accessor);
-			for (const node of arr) {
-				if (componentType === GLTF_FLOAT)
-					buffer.writeFloatLE(node);
-				else if (componentType === GLTF_UNSIGNED_BYTE)
-					buffer.writeUInt8(node);
-			}
+			if (componentType === GLTF_FLOAT)
+				buffer.writeFloatArrayLE(arr);
+			else if (componentType === GLTF_UNSIGNED_BYTE)
+				buffer.writeUInt8Array(arr);
 
 			bins.push(buffer);
 		};
@@ -1065,16 +1063,12 @@ class GLTFWriter {
 			});
 
 			// Write indices into the binary.
-			if (component_type === GLTF_UNSIGNED_BYTE) {
-				for (const idx of mesh.triangles)
-					buffer.writeUInt8(idx);
-			} else if (component_type === GLTF_UNSIGNED_SHORT) {
-				for (const idx of mesh.triangles)
-					buffer.writeUInt16LE(idx);
-			} else if (component_type === GLTF_UNSIGNED_INT) {
-				for (const idx of mesh.triangles)
-					buffer.writeUInt32LE(idx);
-			}
+			if (component_type === GLTF_UNSIGNED_BYTE)
+				buffer.writeUInt8Array(mesh.triangles);
+			else if (component_type === GLTF_UNSIGNED_SHORT)
+				buffer.writeUInt16ArrayLE(mesh.triangles);
+			else if (component_type === GLTF_UNSIGNED_INT)
+				buffer.writeUInt32ArrayLE(mesh.triangles);
 
 			const meshIndex = root.meshes.length;
 			root.meshes.push({
@@ -1160,8 +1154,7 @@ class GLTFWriter {
 				if (padding > 0)
 					buffer.fill(0, padding);
 
-				for (const v of equip.vertices)
-					buffer.writeFloatLE(v);
+				buffer.writeFloatArrayLE(equip.vertices);
 
 				bins.push(buffer);
 			}
@@ -1185,8 +1178,7 @@ class GLTFWriter {
 				if (padding > 0)
 					buffer.fill(0, padding);
 
-				for (const n of equip.normals)
-					buffer.writeFloatLE(n);
+				buffer.writeFloatArrayLE(equip.normals);
 
 				bins.push(buffer);
 			}
@@ -1226,8 +1218,7 @@ class GLTFWriter {
 				if (padding > 0)
 					buffer.fill(0, padding);
 
-				for (const uv of equip.uv)
-					buffer.writeFloatLE(uv);
+				buffer.writeFloatArrayLE(equip.uv);
 
 				bins.push(buffer);
 			}
@@ -1266,8 +1257,7 @@ class GLTFWriter {
 				bin_ofs += buffer_length;
 
 				const buffer = BufferWrapper.alloc(buffer_length, true);
-				for (const idx of equip.boneIndices)
-					buffer.writeUInt8(idx);
+				buffer.writeUInt8Array(equip.boneIndices);
 
 				bins.push(buffer);
 
@@ -1298,8 +1288,7 @@ class GLTFWriter {
 				bin_ofs += weights_buffer_length;
 
 				const weights_buffer = BufferWrapper.alloc(weights_buffer_length, true);
-				for (const w of equip.boneWeights)
-					weights_buffer.writeUInt8(w);
+				weights_buffer.writeUInt8Array(equip.boneWeights);
 
 				bins.push(weights_buffer);
 			}
@@ -1352,16 +1341,12 @@ class GLTFWriter {
 					type: 'SCALAR'
 				});
 
-				if (component_type === GLTF_UNSIGNED_BYTE) {
-					for (const idx of mesh.triangles)
-						buffer.writeUInt8(idx);
-				} else if (component_type === GLTF_UNSIGNED_SHORT) {
-					for (const idx of mesh.triangles)
-						buffer.writeUInt16LE(idx);
-				} else if (component_type === GLTF_UNSIGNED_INT) {
-					for (const idx of mesh.triangles)
-						buffer.writeUInt32LE(idx);
-				}
+				if (component_type === GLTF_UNSIGNED_BYTE)
+					buffer.writeUInt8Array(mesh.triangles);
+				else if (component_type === GLTF_UNSIGNED_SHORT)
+					buffer.writeUInt16ArrayLE(mesh.triangles);
+				else if (component_type === GLTF_UNSIGNED_INT)
+					buffer.writeUInt32ArrayLE(mesh.triangles);
 
 				const meshIndex = root.meshes.length;
 				root.meshes.push({
@@ -1439,19 +1424,24 @@ class GLTFWriter {
 			}
 		}
 
-		const bin_combined = BufferWrapper.concat(bins);
-		root.buffers[0].byteLength = bin_combined.byteLength;
+		let bin_length = 0;
+		for (const bin of bins)
+			bin_length += bin.byteLength;
+
+		root.buffers[0].byteLength = bin_length;
 
 		await generics.createDirectory(path.dirname(this.out));
 
 		if (format === 'glb') {
-			// glb mode: package json and bin into glb container
+			// glb mode: package json and bin into glb container. The bin parts are
+			// copied straight into the container, skipping an intermediate concat.
 			const GLBWriter = require('./GLBWriter');
-			const glb_writer = new GLBWriter(JSON.stringify(root), bin_combined);
+			const glb_writer = new GLBWriter(JSON.stringify(root), bins);
 			const glb_buffer = glb_writer.pack();
 			await glb_buffer.writeToFile(outGLTF);
 		} else {
 			// gltf mode: write separate json and bin files
+			const bin_combined = BufferWrapper.concat(bins);
 			root.buffers[0].uri = path.basename(outBIN);
 			await fsp.writeFile(outGLTF, JSON.stringify(root, null, '\t'), 'utf8');
 			await bin_combined.writeToFile(outBIN);

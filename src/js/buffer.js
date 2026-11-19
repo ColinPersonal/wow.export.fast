@@ -43,6 +43,27 @@ const BIG_ENDIAN = {
 	WRITE_BIG_UINT: Buffer.prototype.writeBigUInt64BE
 };
 
+// Element kinds that _readInt() can bulk-read without a call per element.
+const BULK_UINT_LE = 1;
+const BULK_INT_LE = 2;
+const BULK_UINT_BE = 3;
+const BULK_INT_BE = 4;
+const BULK_FLOAT_LE = 5;
+const BULK_FLOAT_BE = 6;
+const BULK_DOUBLE_LE = 7;
+const BULK_DOUBLE_BE = 8;
+
+const BULK_READ_KIND = new Map([
+	[LITTLE_ENDIAN.READ_UINT, BULK_UINT_LE],
+	[LITTLE_ENDIAN.READ_INT, BULK_INT_LE],
+	[BIG_ENDIAN.READ_UINT, BULK_UINT_BE],
+	[BIG_ENDIAN.READ_INT, BULK_INT_BE],
+	[LITTLE_ENDIAN.READ_FLOAT, BULK_FLOAT_LE],
+	[BIG_ENDIAN.READ_FLOAT, BULK_FLOAT_BE],
+	[LITTLE_ENDIAN.READ_DOUBLE, BULK_DOUBLE_LE],
+	[BIG_ENDIAN.READ_DOUBLE, BULK_DOUBLE_BE]
+]);
+
 /**
  * This class is a wrapper for the node Buffer class which provides a more streamlined
  * interface for reading/writing data. Only required features have been implemented.
@@ -137,6 +158,8 @@ class BufferWrapper {
 	constructor(buf) {
 		this._ofs = 0;
 		this._buf = buf;
+		this._view = null;
+		this._viewSource = null;
 	}
 
 	/**
@@ -1118,6 +1141,14 @@ class BufferWrapper {
 			this._checkBounds(byteLength * count);
 
 			const values = new Array(count);
+
+			// Fast paths for the common element types. These produce exactly the
+			// values the Buffer prototype readers would, without a call per element.
+			const kind = BULK_READ_KIND.get(func);
+			const ofs = this._ofs;
+			if (kind !== undefined && ofs === Math.floor(ofs) && this._readBulk(values, count, kind, byteLength, ofs))
+				return values;
+
 			for (let i = 0; i < count; i++) {
 				values[i] = func.call(this._buf, this._ofs, byteLength);
 				this._ofs += byteLength;
@@ -1134,6 +1165,179 @@ class BufferWrapper {
 	}
 
 	/**
+	 * Get a DataView over the internal buffer, cached until the buffer is replaced.
+	 * @returns {DataView}
+	 */
+	_getDataView() {
+		const buf = this._buf;
+		if (this._viewSource !== buf) {
+			this._view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+			this._viewSource = buf;
+		}
+
+		return this._view;
+	}
+
+	/**
+	 * Bulk-read `count` elements starting at `ofs` into `values`.
+	 * Bounds must already have been checked. Returns false (having read nothing)
+	 * if there is no fast path for this element type.
+	 * @param {Array} values
+	 * @param {number} count
+	 * @param {number} kind One of the BULK_* constants.
+	 * @param {number} byteLength
+	 * @param {number} ofs
+	 * @returns {boolean}
+	 */
+	_readBulk(values, count, kind, byteLength, ofs) {
+		const buf = this._buf;
+		let p = ofs;
+		let i = 0;
+
+		if (byteLength === 1 && (kind === BULK_UINT_LE || kind === BULK_UINT_BE)) {
+			for (; i < count; i++)
+				values[i] = buf[p++];
+		} else if (byteLength === 1 && (kind === BULK_INT_LE || kind === BULK_INT_BE)) {
+			for (; i < count; i++)
+				values[i] = (buf[p++] << 24) >> 24;
+		} else if (byteLength === 2 && kind === BULK_UINT_LE) {
+			for (; i < count; i++, p += 2)
+				values[i] = buf[p] | (buf[p + 1] << 8);
+		} else if (byteLength === 2 && kind === BULK_INT_LE) {
+			for (; i < count; i++, p += 2)
+				values[i] = ((buf[p] | (buf[p + 1] << 8)) << 16) >> 16;
+		} else if (byteLength === 2 && kind === BULK_UINT_BE) {
+			for (; i < count; i++, p += 2)
+				values[i] = (buf[p] << 8) | buf[p + 1];
+		} else if (byteLength === 2 && kind === BULK_INT_BE) {
+			for (; i < count; i++, p += 2)
+				values[i] = (((buf[p] << 8) | buf[p + 1]) << 16) >> 16;
+		} else if (byteLength === 4 && kind === BULK_UINT_LE) {
+			for (; i < count; i++, p += 4)
+				values[i] = (buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16) | (buf[p + 3] << 24)) >>> 0;
+		} else if (byteLength === 4 && kind === BULK_INT_LE) {
+			for (; i < count; i++, p += 4)
+				values[i] = buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16) | (buf[p + 3] << 24);
+		} else if (byteLength === 4 && kind === BULK_UINT_BE) {
+			for (; i < count; i++, p += 4)
+				values[i] = ((buf[p] << 24) | (buf[p + 1] << 16) | (buf[p + 2] << 8) | buf[p + 3]) >>> 0;
+		} else if (byteLength === 4 && kind === BULK_INT_BE) {
+			for (; i < count; i++, p += 4)
+				values[i] = (buf[p] << 24) | (buf[p + 1] << 16) | (buf[p + 2] << 8) | buf[p + 3];
+		} else if (kind === BULK_FLOAT_LE) {
+			const view = this._getDataView();
+			for (; i < count; i++, p += 4)
+				values[i] = view.getFloat32(p, true);
+		} else if (kind === BULK_FLOAT_BE) {
+			const view = this._getDataView();
+			for (; i < count; i++, p += 4)
+				values[i] = view.getFloat32(p, false);
+		} else if (kind === BULK_DOUBLE_LE) {
+			const view = this._getDataView();
+			for (; i < count; i++, p += 8)
+				values[i] = view.getFloat64(p, true);
+		} else if (kind === BULK_DOUBLE_BE) {
+			const view = this._getDataView();
+			for (; i < count; i++, p += 8)
+				values[i] = view.getFloat64(p, false);
+		} else {
+			return false;
+		}
+
+		this._ofs = ofs + (i * byteLength);
+		return true;
+	}
+
+	/**
+	 * Write an array of floats in little endian.
+	 * Produces the same bytes as calling writeFloatLE() for each element.
+	 * @param {ArrayLike<number>} values
+	 */
+	writeFloatArrayLE(values) {
+		const count = values.length;
+		if (!(this.remainingBytes >= count * 4) || this._ofs !== Math.floor(this._ofs)) {
+			for (let i = 0; i < count; i++)
+				this.writeFloatLE(values[i]);
+			return;
+		}
+
+		const view = this._getDataView();
+		let p = this._ofs;
+		for (let i = 0; i < count; i++, p += 4)
+			view.setFloat32(p, +values[i], true);
+
+		this._ofs = p;
+	}
+
+	/**
+	 * Write an array of unsigned 8-bit integers.
+	 * Produces the same bytes (and throws the same errors) as calling writeUInt8() for each element.
+	 * @param {ArrayLike<number>} values
+	 */
+	writeUInt8Array(values) {
+		this._writeUIntArray(values, 1, 0xFF);
+	}
+
+	/**
+	 * Write an array of unsigned 16-bit integers in little endian.
+	 * Produces the same bytes (and throws the same errors) as calling writeUInt16LE() for each element.
+	 * @param {ArrayLike<number>} values
+	 */
+	writeUInt16ArrayLE(values) {
+		this._writeUIntArray(values, 2, 0xFFFF);
+	}
+
+	/**
+	 * Write an array of unsigned 32-bit integers in little endian.
+	 * Produces the same bytes (and throws the same errors) as calling writeUInt32LE() for each element.
+	 * @param {ArrayLike<number>} values
+	 */
+	writeUInt32ArrayLE(values) {
+		this._writeUIntArray(values, 4, 0xFFFFFFFF);
+	}
+
+	/**
+	 * Write an array of unsigned little endian integers.
+	 * Integral in-range values are stored directly; anything else is handed to the
+	 * Buffer prototype writer so coercion and range errors stay identical.
+	 * @param {ArrayLike<number>} values
+	 * @param {number} byteLength 1, 2 or 4.
+	 * @param {number} max
+	 */
+	_writeUIntArray(values, byteLength, max) {
+		const count = values.length;
+		const buf = this._buf;
+		const func = LITTLE_ENDIAN.WRITE_UINT;
+
+		if (!(this.remainingBytes >= count * byteLength) || this._ofs !== Math.floor(this._ofs)) {
+			for (let i = 0; i < count; i++)
+				this._writeInt(values[i], func, byteLength);
+			return;
+		}
+
+		let p = this._ofs;
+		for (let i = 0; i < count; i++, p += byteLength) {
+			const v = values[i];
+			if (typeof v === 'number' && v >= 0 && v <= max && v === Math.floor(v)) {
+				buf[p] = v;
+				if (byteLength > 1) {
+					buf[p + 1] = v >>> 8;
+					if (byteLength > 2) {
+						buf[p + 2] = v >>> 16;
+						buf[p + 3] = v >>> 24;
+					}
+				}
+			} else {
+				// Keep the offset in sync in case this throws.
+				this._ofs = p;
+				func.call(buf, v, p, byteLength);
+			}
+		}
+
+		this._ofs = p;
+	}
+
+	/**
 	 * Write an integer to the buffer.
 	 * @param {number} value
 	 * @param {function} func Buffer prototype function.
@@ -1147,4 +1351,4 @@ class BufferWrapper {
 	}
 }
 
-module.exports = BufferWrapper;
+module.exports = BufferWrapper;
