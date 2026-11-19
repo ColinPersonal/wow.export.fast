@@ -83,14 +83,18 @@ class WMOExporter {
 		const isClassic = !!this.wmo.textureNames;
 		const materialCount = this.wmo.materials.length;
 
-		helper.setCurrentTaskMax(materialCount);
+		// Pass 1 (sequential): resolve every material texture slot to its output
+		// paths and material name, in the original material/slot order.
+		const slots = [];
+
+		// Unique texture jobs (fetch/convert/write), keyed by source + destination.
+		const jobs = new Map();
 
 		for (let i = 0; i < materialCount; i++) {
 			if (helper.isCancelled())
 				return;
 
 			const material = this.wmo.materials[i];
-			helper.setCurrentTaskValue(i);
 
 			const materialTextures = [material.texture1, material.texture2, material.texture3];
 
@@ -167,53 +171,227 @@ class WMOExporter {
 						texFile = path.relative(path.dirname(out), texPath);
 					}
 
-					// Only hit the disk for an existence check when the result matters.
-					const file_existed = (glbMode || !config.overwriteFiles) ? await generics.fileExists(texPath) : false;
-
-					if (glbMode && !raw) {
-						// glb mode: convert to PNG buffer without writing
-						const data = await casc.getFile(fileDataID);
-						const blp = new BLPFile(data);
-						const png_buffer = blp.toPNG(useAlpha ? 0b1111 : 0b0111);
-						texture_buffers.set(fileDataID, png_buffer);
-						log.write('Buffering WMO texture %d for GLB embedding', fileDataID);
-
-						if (!file_existed)
-							files_to_cleanup.push(texPath);
-					} else if (config.overwriteFiles || !file_existed) {
-						// Shared textures are written once per export run, not once per model.
-						await exportSession.once('tex:' + texPath + ':' + (raw ? 'raw' : useAlpha), async () => {
-							const data = await casc.getFile(fileDataID);
-
-							log.write('Exporting WMO texture %d -> %s', fileDataID, texPath);
-							if (raw) {
-								await data.writeToFile(texPath);
-							} else {
-								const blp = new BLPFile(data);
-								await blp.saveToPNG(texPath, useAlpha ? 0b1111 : 0b0111);
-							}
-						});
-					} else {
-						log.write('Skipping WMO texture export %s (file exists, overwrite disabled)', texPath);
-					}
-
 					if (usePosix)
 						texFile = ExportHelper.win32ToPosix(texFile);
 
-					mtl?.addMaterial(matName, texFile);
-					textureMap.set(fileDataID, { matPathRelative: texFile, matPath: texPath, matName });
+					const jobKey = fileDataID + '|' + texPath;
+					let job = jobs.get(jobKey);
+					if (job === undefined) {
+						job = { fileDataID, texPath, result: null, error: null };
+						jobs.set(jobKey, job);
+					}
 
 					// shader 23: use texture2 (first competitive diffuse layer at UV0)
 					// other shaders: use the first available texture
-					if (!materialMap.has(i) && (!is_shader23 || materialTexture === material.texture2))
-						materialMap.set(i, matName);
+					const isPrimary = !is_shader23 || materialTexture === material.texture2;
+
+					slots.push({ materialIndex: i, fileDataID, texPath, texFile, matName, isPrimary, job });
 				} catch (e) {
 					log.write('Failed to export texture %d for WMO: %s', fileDataID, e.message);
 				}
 			}
 		}
 
+		// Pass 2 (concurrent): fetch/convert/write each unique texture once.
+		helper.setCurrentTaskMax(jobs.size);
+		let completed = 0;
+
+		await generics.queue([...jobs.values()], async (job) => {
+			if (helper.isCancelled())
+				return;
+
+			const { fileDataID, texPath } = job;
+
+			try {
+				// Only hit the disk for an existence check when the result matters.
+				const file_existed = (glbMode || !config.overwriteFiles) ? await generics.fileExists(texPath) : false;
+				let png_buffer;
+
+				if (glbMode && !raw) {
+					// glb mode: convert to PNG buffer without writing
+					png_buffer = await exportSession.io(async () => {
+						const data = await casc.getFile(fileDataID);
+						const blp = new BLPFile(data);
+						return blp.toPNG(useAlpha ? 0b1111 : 0b0111);
+					});
+					log.write('Buffering WMO texture %d for GLB embedding', fileDataID);
+				} else if (config.overwriteFiles || !file_existed) {
+					// Shared textures are written once per export run, not once per model.
+					await exportSession.once('tex:' + texPath + ':' + (raw ? 'raw' : useAlpha), () => exportSession.io(async () => {
+						const data = await casc.getFile(fileDataID);
+
+						log.write('Exporting WMO texture %d -> %s', fileDataID, texPath);
+						if (raw) {
+							await data.writeToFile(texPath);
+						} else {
+							const blp = new BLPFile(data);
+							await blp.saveToPNG(texPath, useAlpha ? 0b1111 : 0b0111);
+						}
+					}));
+				} else {
+					log.write('Skipping WMO texture export %s (file exists, overwrite disabled)', texPath);
+				}
+
+				job.result = { file_existed, png_buffer };
+			} catch (e) {
+				job.error = e;
+			}
+
+			helper.setCurrentTaskValue(++completed);
+		}, ExportHelper.getConcurrency());
+
+		if (helper.isCancelled())
+			return;
+
+		// Pass 3 (sequential): populate the MTL and maps in the original order.
+		for (const slot of slots) {
+			const { job, fileDataID, texPath, texFile, matName } = slot;
+
+			if (job.error !== null) {
+				log.write('Failed to export texture %d for WMO: %s', fileDataID, job.error.message);
+				continue;
+			}
+
+			if (job.result === null)
+				continue;
+
+			if (glbMode && !raw) {
+				texture_buffers.set(fileDataID, job.result.png_buffer);
+
+				if (!job.result.file_existed)
+					files_to_cleanup.push(texPath);
+			}
+
+			mtl?.addMaterial(matName, texFile);
+			textureMap.set(fileDataID, { matPathRelative: texFile, matPath: texPath, matName });
+
+			if (!materialMap.has(slot.materialIndex) && slot.isPrimary)
+				materialMap.set(slot.materialIndex, matName);
+		}
+
 		return { textureMap, materialMap, texture_buffers, files_to_cleanup };
+	}
+
+	/**
+	 * Load every group of this WMO with bounded concurrency. Groups are cached
+	 * on the loader (wmo.groups), so the in-order consumers that follow call
+	 * getGroup() and receive the already-loaded instance. Each index is
+	 * requested exactly once here, so no group is fetched/parsed twice.
+	 * @param {ExportHelper} helper
+	 */
+	async _prefetchGroups(helper) {
+		const wmo = this.wmo;
+		const indices = [];
+		for (let i = 0, n = wmo.groupCount; i < n; i++) {
+			if (!wmo.groups?.[i])
+				indices.push(i);
+		}
+
+		await generics.queue(indices, async (i) => {
+			if (helper.isCancelled())
+				return;
+
+			await wmo.getGroup(i);
+		}, ExportHelper.getConcurrency());
+	}
+
+	/**
+	 * Export the placed doodads of a single doodad set with bounded concurrency.
+	 * Resolves entries in set order, exports each unique model once, and returns
+	 * the entries whose model is available (in the original order), or null if
+	 * the export was cancelled.
+	 * @param {object} set
+	 * @param {string} out
+	 * @param {boolean} isRaw
+	 * @param {ExportHelper} helper
+	 * @returns {Promise<?Array<{doodad: object, fileDataID: number, m2Path: string}>>}
+	 */
+	async _exportDoodadSet(set, out, isRaw, helper) {
+		const wmo = this.wmo;
+		const config = core.view.config;
+		const count = set.doodadCount;
+
+		const entries = [];
+		const unique = new Map();
+
+		for (let i = 0; i < count; i++) {
+			if (helper.isCancelled())
+				return null;
+
+			const doodad = wmo.doodads[set.firstInstanceIndex + i];
+			let fileDataID = 0;
+			let fileName;
+
+			if (wmo.fileDataIDs) {
+				// Retail, use fileDataID and lookup the filename.
+				fileDataID = wmo.fileDataIDs[doodad.offset];
+				fileName = listfile.getByID(fileDataID);
+			} else {
+				// Classic, use fileName and lookup the fileDataID.
+				fileName = wmo.doodadNames[doodad.offset];
+				fileDataID = listfile.getByFilename(fileName) || 0;
+			}
+
+			if (!(fileDataID > 0))
+				continue;
+
+			try {
+				if (isRaw) {
+					// Handle unknown files.
+					if (fileName === undefined)
+						fileName = listfile.formatUnknownFile(fileDataID, '.m2');
+				} else if (fileName !== undefined) {
+					// Replace M2 extension with OBJ.
+					fileName = ExportHelper.replaceExtension(fileName, '.obj');
+				} else {
+					// Handle unknown files.
+					fileName = listfile.formatUnknownFile(fileDataID, '.obj');
+				}
+
+				let m2Path;
+				if (config.enableSharedChildren)
+					m2Path = ExportHelper.getExportPath(fileName);
+				else
+					m2Path = ExportHelper.replaceFile(out, fileName);
+
+				entries.push({ doodad, fileDataID, m2Path });
+
+				// Only export doodads that are not already exported.
+				if (!doodadCache.has(fileDataID) && !unique.has(fileDataID))
+					unique.set(fileDataID, m2Path);
+			} catch (e) {
+				log.write('Failed to load doodad %d for %s: %s', fileDataID, set.name, e.message);
+			}
+		}
+
+		helper.setCurrentTaskMax(unique.size);
+
+		const failed = new Set();
+		let completed = 0;
+
+		// exportPlacedModel de-duplicates per output path for the export run
+		// (exportSession.once('model:' + path)), so concurrent WMOs share work.
+		await generics.queue([...unique], async ([fileDataID, m2Path]) => {
+			if (helper.isCancelled())
+				return;
+
+			try {
+				await exportPlacedModel(fileDataID, m2Path, isRaw, helper);
+
+				if (!helper.isCancelled())
+					doodadCache.add(fileDataID);
+			} catch (e) {
+				failed.add(fileDataID);
+				log.write('Failed to load doodad %d for %s: %s', fileDataID, set.name, e.message);
+			}
+
+			helper.setCurrentTaskValue(++completed);
+		}, ExportHelper.getConcurrency());
+
+		if (helper.isCancelled())
+			return null;
+
+		return entries.filter(entry => !failed.has(entry.fileDataID));
 	}
 
 	/**
@@ -268,6 +446,12 @@ class WMOExporter {
 				}
 			}
 		}
+
+		// Load all groups concurrently; consumption below stays in index order.
+		await this._prefetchGroups(helper);
+
+		if (helper.isCancelled())
+			return;
 
 		// Iterate over the groups once to calculate the total size of our
 		// vertex/normal/uv arrays allowing for pre-allocation.
@@ -418,6 +602,9 @@ class WMOExporter {
 		helper.setCurrentTaskName(wmoName + ' groups');
 		helper.setCurrentTaskMax(wmo.groupCount);
 
+		// Load all groups concurrently; consumption below stays in index order.
+		await this._prefetchGroups(helper);
+
 		// Iterate over the groups once to calculate the total size of our
 		// vertex/normal/uv arrays allowing for pre-allocation.
 		for (let i = 0, n = wmo.groupCount; i < n; i++) {
@@ -548,81 +735,34 @@ class WMOExporter {
 				log.write('Exporting WMO doodad set %s with %d doodads...', set.name, count);
 
 				helper.setCurrentTaskName(wmoName + ', doodad set ' + set.name);
-				helper.setCurrentTaskMax(count);
 
-				for (let i = 0; i < count; i++) {
-					// Abort if the export has been cancelled.
-					if (helper.isCancelled())
-						return;
+				// Unique doodads export concurrently; rows are added in set order.
+				const placed = await this._exportDoodadSet(set, out, false, helper);
+				if (placed === null)
+					return;
 
-					helper.setCurrentTaskValue(i);
+				for (const { doodad, fileDataID, m2Path } of placed) {
+					let modelPath = path.relative(outDir, m2Path);
 
-					const doodad = wmo.doodads[set.firstInstanceIndex + i];
-					let fileDataID = 0;
-					let fileName;
-		
-					if (wmo.fileDataIDs) {
-						// Retail, use fileDataID and lookup the filename.
-						fileDataID = wmo.fileDataIDs[doodad.offset];
-						fileName = listfile.getByID(fileDataID);
-					} else {
-						// Classic, use fileName and lookup the fileDataID.
-						fileName = wmo.doodadNames[doodad.offset];
-						fileDataID = listfile.getByFilename(fileName) || 0;
-					}
-		
-					if (fileDataID > 0) {
-						try {
-							if (fileName !== undefined) {
-								// Replace M2 extension with OBJ.
-								fileName = ExportHelper.replaceExtension(fileName, '.obj');
-							} else {
-								// Handle unknown files.
-								fileName = listfile.formatUnknownFile(fileDataID, '.obj');
-							}
+					if (useAbsolute === true)
+						modelPath = path.resolve(outDir, modelPath);
 
-							let m2Path;
-							if (core.view.config.enableSharedChildren)
-								m2Path = ExportHelper.getExportPath(fileName);
-							else
-								m2Path = ExportHelper.replaceFile(out, fileName);
+					if (usePosix)
+						modelPath = ExportHelper.win32ToPosix(modelPath);
 
-							// Only export doodads that are not already exported.
-							if (!doodadCache.has(fileDataID)) {
-								await exportPlacedModel(fileDataID, m2Path, false, helper);
-								
-								// Abort if the export has been cancelled.
-								if (helper.isCancelled())
-									return;
-
-								doodadCache.add(fileDataID);
-							}
-
-							let modelPath = path.relative(outDir, m2Path);
-
-							if (useAbsolute === true)
-								modelPath = path.resolve(outDir, modelPath);
-
-							if (usePosix)
-								modelPath = ExportHelper.win32ToPosix(modelPath);
-
-							csv.addRow({
-								ModelFile: modelPath,
-								PositionX: doodad.position[0],
-								PositionY: doodad.position[1],
-								PositionZ: doodad.position[2],
-								RotationW: doodad.rotation[3],
-								RotationX: doodad.rotation[0],
-								RotationY: doodad.rotation[1],
-								RotationZ: doodad.rotation[2],
-								ScaleFactor: doodad.scale,
-								DoodadSet: set.name,
-								FileDataID: fileDataID,
-							});
-						} catch (e) {
-							log.write('Failed to load doodad %d for %s: %s', fileDataID, set.name, e.message);
-						}
-					}
+					csv.addRow({
+						ModelFile: modelPath,
+						PositionX: doodad.position[0],
+						PositionY: doodad.position[1],
+						PositionZ: doodad.position[2],
+						RotationW: doodad.rotation[3],
+						RotationX: doodad.rotation[0],
+						RotationY: doodad.rotation[1],
+						RotationZ: doodad.rotation[2],
+						ScaleFactor: doodad.scale,
+						DoodadSet: set.name,
+						FileDataID: fileDataID,
+					});
 				}
 			}
 
@@ -786,6 +926,9 @@ class WMOExporter {
 		helper.setCurrentTaskName(wmoName + ' groups');
 		helper.setCurrentTaskMax(wmo.groupCount);
 
+		// load all groups concurrently; consumption below stays in index order
+		await this._prefetchGroups(helper);
+
 		// iterate over the groups once to calculate the total size
 		for (let i = 0, n = wmo.groupCount; i < n; i++) {
 			if (helper.isCancelled())
@@ -899,6 +1042,10 @@ class WMOExporter {
 
 		helper.setCurrentTaskName(wmoName + ' groups');
 		helper.setCurrentTaskMax(wmo.groupCount);
+
+		// load all groups concurrently; the per-group writes below stay sequential
+		// and in index order (group names may collide on the same output file)
+		await this._prefetchGroups(helper);
 
 		// export each group separately
 		for (let i = 0, n = wmo.groupCount; i < n; i++) {
@@ -1017,74 +1164,34 @@ class WMOExporter {
 				log.write('exporting wmo doodad set %s with %d doodads...', set.name, count);
 
 				helper.setCurrentTaskName(wmoName + ', doodad set ' + set.name);
-				helper.setCurrentTaskMax(count);
 
-				for (let j = 0; j < count; j++) {
-					if (helper.isCancelled())
-						return;
+				// unique doodads export concurrently; rows are added in set order
+				const placed = await this._exportDoodadSet(set, out, false, helper);
+				if (placed === null)
+					return;
 
-					helper.setCurrentTaskValue(j);
+				for (const { doodad, fileDataID, m2Path } of placed) {
+					let modelPath = path.relative(outDir, m2Path);
 
-					const doodad = wmo.doodads[set.firstInstanceIndex + j];
-					let fileDataID = 0;
-					let fileName;
+					if (useAbsolute === true)
+						modelPath = path.resolve(outDir, modelPath);
 
-					if (wmo.fileDataIDs) {
-						fileDataID = wmo.fileDataIDs[doodad.offset];
-						fileName = listfile.getByID(fileDataID);
-					} else {
-						fileName = wmo.doodadNames[doodad.offset];
-						fileDataID = listfile.getByFilename(fileName) || 0;
-					}
+					if (usePosix)
+						modelPath = ExportHelper.win32ToPosix(modelPath);
 
-					if (fileDataID > 0) {
-						try {
-							if (fileName !== undefined) {
-								fileName = ExportHelper.replaceExtension(fileName, '.obj');
-							} else {
-								fileName = listfile.formatUnknownFile(fileDataID, '.obj');
-							}
-
-							let m2Path;
-							if (config.enableSharedChildren)
-								m2Path = ExportHelper.getExportPath(fileName);
-							else
-								m2Path = ExportHelper.replaceFile(out, fileName);
-
-							if (!doodadCache.has(fileDataID)) {
-								await exportPlacedModel(fileDataID, m2Path, false, helper);
-
-								if (helper.isCancelled())
-									return;
-
-								doodadCache.add(fileDataID);
-							}
-
-							let modelPath = path.relative(outDir, m2Path);
-
-							if (useAbsolute === true)
-								modelPath = path.resolve(outDir, modelPath);
-
-							if (usePosix)
-								modelPath = ExportHelper.win32ToPosix(modelPath);
-
-							csv.addRow({
-								ModelFile: modelPath,
-								PositionX: doodad.position[0],
-								PositionY: doodad.position[1],
-								PositionZ: doodad.position[2],
-								RotationW: doodad.rotation[3],
-								RotationX: doodad.rotation[0],
-								RotationY: doodad.rotation[1],
-								RotationZ: doodad.rotation[2],
-								ScaleFactor: doodad.scale,
-								DoodadSet: set.name,
-								FileDataID: fileDataID,
-							});
-						} catch (e) {
-							log.write('failed to load doodad %d for %s: %s', fileDataID, set.name, e.message);
-						}
-					}
+					csv.addRow({
+						ModelFile: modelPath,
+						PositionX: doodad.position[0],
+						PositionY: doodad.position[1],
+						PositionZ: doodad.position[2],
+						RotationW: doodad.rotation[3],
+						RotationX: doodad.rotation[0],
+						RotationY: doodad.rotation[1],
+						RotationZ: doodad.rotation[2],
+						ScaleFactor: doodad.scale,
+						DoodadSet: set.name,
+						FileDataID: fileDataID,
+					});
 				}
 			}
 
@@ -1289,58 +1396,10 @@ class WMOExporter {
 			log.write('Exporting WMO doodad set %s with %d doodads...', set.name, count);
 
 			helper.setCurrentTaskName('Doodad set ' + set.name);
-			helper.setCurrentTaskMax(count);
 
-			for (let i = 0; i < count; i++) {
-				// Abort if the export has been cancelled.
-				if (helper.isCancelled())
-					return;
-
-				helper.setCurrentTaskValue(i);
-
-				const doodad = this.wmo.doodads[set.firstInstanceIndex + i];
-				let fileDataID = 0;
-				let fileName;
-	
-				if (this.wmo.fileDataIDs) {
-					// Retail, use fileDataID and lookup the filename.
-					fileDataID = this.wmo.fileDataIDs[doodad.offset];
-					fileName = listfile.getByID(fileDataID);
-				} else {
-					// Classic, use fileName and lookup the fileDataID.
-					fileName = this.wmo.doodadNames[doodad.offset];
-					fileDataID = listfile.getByFilename(fileName) || 0;
-				}
-	
-				if (fileDataID > 0) {
-					try {
-						if (fileName === undefined) {
-							// Handle unknown files.
-							fileName = listfile.formatUnknownFile(fileDataID, '.m2');
-						}
-
-						let m2Path;
-						if (core.view.config.enableSharedChildren)
-							m2Path = ExportHelper.getExportPath(fileName);
-						else
-							m2Path = ExportHelper.replaceFile(out, fileName);
-
-						// Only export doodads that are not already exported.
-						if (!doodadCache.has(fileDataID)) {
-							
-							await exportPlacedModel(fileDataID, m2Path, true, helper);
-
-							// Abort if the export has been cancelled.
-							if (helper.isCancelled())
-								return;
-
-							doodadCache.add(fileDataID);
-						}
-					} catch (e) {
-						log.write('Failed to load doodad %d for %s: %s', fileDataID, set.name, e.message);
-					}
-				}
-			}
+			// Unique doodads export concurrently.
+			if (await this._exportDoodadSet(set, out, true, helper) === null)
+				return;
 		}
 
 		await manifest.write();

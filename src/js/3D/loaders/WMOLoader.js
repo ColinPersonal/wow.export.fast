@@ -94,6 +94,34 @@ const WMOOptionalChunks = [
 	0x4D44414C, // MDAL (Ambient Color)
 ];
 
+/**
+ * True when `count` floats can be bulk-read from the current offset with the same
+ * result as the per-element loops (whole stride groups, all in bounds).
+ * @param {BufferWrapper} data
+ * @param {number} count
+ * @param {number} stride
+ */
+const can_bulk_read_floats = (data, count, stride) => {
+	return Number.isInteger(count) && count % stride === 0 && data.remainingBytes >= count * 4;
+};
+
+/**
+ * Read `count` floats as (x, y, z) triples and store them as (x, z, -y).
+ * @param {BufferWrapper} data
+ * @param {number} count
+ * @returns {number[]}
+ */
+const read_swizzled_vec3 = (data, count) => {
+	const values = data.readFloatLE(count);
+	for (let i = 0; i < count; i += 3) {
+		const y = values[i + 1];
+		values[i + 1] = values[i + 2];
+		values[i + 2] = y * -1;
+	}
+
+	return values;
+};
+
 const WMOChunkHandlers = {
 	// MVER (Version) [WMO Root, WMO Group]
 	0x4D564552: function(data) {
@@ -395,6 +423,12 @@ const WMOChunkHandlers = {
 	// MOVT (vertices) [WMO Group]
 	0x4D4F5654: function(data, chunkSize) {
 		const count = chunkSize / 4;
+
+		if (can_bulk_read_floats(data, count, 3)) {
+			this.vertices = read_swizzled_vec3(data, count);
+			return;
+		}
+
 		const vertices = this.vertices = new Array(count);
 
 		for (let i = 0; i < count; i += 3) {
@@ -410,6 +444,12 @@ const WMOChunkHandlers = {
 			this.uvs = [];
 		
 		const count = chunkSize / 4;
+
+		if (can_bulk_read_floats(data, count, 2)) {
+			this.uvs.push(data.readFloatLE(count));
+			return;
+		}
+
 		const uvs = new Array(count);
 		for (let i = 0; i < count; i += 2) {
 			uvs[i] = data.readFloatLE();
@@ -422,6 +462,12 @@ const WMOChunkHandlers = {
 	// MONR (Normals) [WMO Group]
 	0x4D4F4E52: function(data, chunkSize) {
 		const count = chunkSize / 4;
+
+		if (can_bulk_read_floats(data, count, 3)) {
+			this.normals = read_swizzled_vec3(data, count);
+			return;
+		}
+
 		const normals = this.normals = new Array(count);
 
 		for (let i = 0; i < count; i += 3) {

@@ -53,18 +53,20 @@ class MTLWriter {
 		const useAbsolute = core.view.config.enableAbsoluteMTLPaths;
 		const writer = new FileWriter(this.out);
 
+		const lines = [];
 		for (const material of this.materials) {
-			await writer.writeLine('newmtl ' + material.name);
-			await writer.writeLine('illum 1');
+			lines.push('newmtl ' + material.name);
+			lines.push('illum 1');
 
 			let materialFile = material.file;
 			if (useAbsolute)
 				materialFile = path.resolve(mtlDir, materialFile);
 
-			await writer.writeLine('map_Kd ' + materialFile);
+			lines.push('map_Kd ' + materialFile);
 		}
 
-		writer.close();
+		await writer.write(lines.join('\n') + '\n');
+		await writer.close();
 	}
 }
 

@@ -239,9 +239,11 @@ const encode = (data, width, height, fast = false) => {
 
 	let deflated;
 	if (fast)
-		// Run-length matching is much cheaper than full LZ77 and, on filtered
-		// image data, compresses as well or better than a low deflate level.
-		deflated = zlib.deflateSync(filterFast(data, width, height, bytesPerPixel), { level: 1, strategy: zlib.constants.Z_RLE });
+		// Level 1 with the default strategy runs about as fast as Z_RLE on
+		// texture data but finds the repeats DXT block decoding leaves behind,
+		// giving files 25-40% smaller (within ~15% of adaptive mode). It is
+		// slower than Z_RLE only on noise-like images that barely compress.
+		deflated = zlib.deflateSync(filterFast(data, width, height, bytesPerPixel), { level: 1 });
 	else
 		deflated = zlib.deflateSync(filter(data, width, height, bytesPerPixel));
 

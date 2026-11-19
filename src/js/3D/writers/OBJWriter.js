@@ -7,6 +7,7 @@ const path = require('path');
 const constants = require('../../constants');
 const generics = require('../../generics');
 const FileWriter = require('../../file-writer');
+const { LineBuffer } = FileWriter;
 
 class OBJWriter {
 	/**
@@ -144,40 +145,64 @@ class OBJWriter {
 		await generics.createDirectory(path.dirname(this.out));
 		const writer = new FileWriter(this.out);
 
+		// Lines are collected and written in large chunks; awaiting a stream
+		// write per line made this several times slower.
+		const out = new LineBuffer(writer);
+
 		// Write header.
-		await writer.writeLine('# Exported using wow.export v' + constants.VERSION);
-		await writer.writeLine('o ' + this.name);
+		out.push('# Exported using wow.export v' + constants.VERSION);
+		out.push('o ' + this.name);
 
 		// Link material library.
 		if (this.mtl)
-			await writer.writeLine('mtllib ' + this.mtl);
+			out.push('mtllib ' + this.mtl);
 
 		// collect used indices (accounting for vertex offsets from appended geometry)
-		const usedIndices = new Set();
-		this.meshes.forEach(mesh => {
-			const offset = mesh.vertexOffset || 0;
-			mesh.triangles.forEach(index => usedIndices.add(index + offset));
-		});
+		let maxIndex = Math.max(this.verts.length / 3, this.normals.length / 3, this.colors ? this.colors.length / 4 : 0);
+		for (const uv of this.uvs)
+			maxIndex = Math.max(maxIndex, uv.length / 2);
 
-		const vertMap = new Map();
-		const normalMap = new Map();
-		const uvMap = new Map();
+		for (const mesh of this.meshes) {
+			const offset = mesh.vertexOffset || 0;
+			for (const index of mesh.triangles)
+				if (index + offset > maxIndex)
+					maxIndex = index + offset;
+		}
+
+		const size = Math.ceil(maxIndex) + 1;
+		const used = new Uint8Array(size);
+		for (const mesh of this.meshes) {
+			const offset = mesh.vertexOffset || 0;
+			for (const index of mesh.triangles) {
+				const j = index + offset;
+				if (j >= 0 && j < size && Number.isInteger(j))
+					used[j] = 1;
+			}
+		}
+
+		// Index remaps. NaN marks an index with no written element, which
+		// (as with the previous Map lookups) prints as "NaN" in face lines.
+		const vertMap = new Float64Array(size).fill(NaN);
+		const normalMap = new Float64Array(size).fill(NaN);
+		const uvMap = new Float64Array(size).fill(NaN);
 
 		// Write verts.
 		const verts = this.verts;
 		for (let i = 0, j = 0, u = 0, n = verts.length; i < n; j++, i+= 3) {
-			if (usedIndices.has(j)) {
-				vertMap.set(j, u++);
-				await writer.writeLine('v ' + verts[i] + ' ' + verts[i + 1] + ' ' + verts[i + 2]);
+			if (used[j] === 1) {
+				vertMap[j] = u++;
+				if (out.push('v ' + verts[i] + ' ' + verts[i + 1] + ' ' + verts[i + 2]))
+					await out.flush();
 			}
 		}
 
 		// Write normals.
 		const normals = this.normals;
 		for (let i = 0, j = 0, u = 0, n = normals.length; i < n; j++, i += 3) {
-			if (usedIndices.has(j)) {
-				normalMap.set(j, u++);
-				await writer.writeLine('vn ' + normals[i] + ' ' + normals[i + 1] + ' ' + normals[i + 2]);
+			if (used[j] === 1) {
+				normalMap[j] = u++;
+				if (out.push('vn ' + normals[i] + ' ' + normals[i + 1] + ' ' + normals[i + 2]))
+					await out.flush();
 			}
 		}
 
@@ -185,8 +210,8 @@ class OBJWriter {
 		if (this.colors) {
 			const colors = this.colors;
 			for (let i = 0, j = 0, n = colors.length; i < n; j++, i += 4) {
-				if (usedIndices.has(j))
-					await writer.writeLine('vc ' + colors[i] + ' ' + colors[i + 1] + ' ' + colors[i + 2] + ' ' + colors[i + 3]);
+				if (used[j] === 1 && out.push('vc ' + colors[i] + ' ' + colors[i + 1] + ' ' + colors[i + 2] + ' ' + colors[i + 3]))
+					await out.flush();
 			}
 		}
 
@@ -204,26 +229,31 @@ class OBJWriter {
 					prefix += (uvIndex + 1);
 
 				for (let i = 0, j = 0, u = 0, n = uv.length; i < n; j++, i += 2) {
-					if (usedIndices.has(j)) {
+					if (used[j] === 1) {
 						// Build the index reference using just the first layer
 						// since it will be identical for all other layers.
 						if (uvIndex === 0)
-							uvMap.set(j, u++);
+							uvMap[j] = u++;
 
 						const v = this.flip_uvs ? (1 - uv[i + 1]) : uv[i + 1];
-						await writer.writeLine(prefix + ' ' + uv[i] + ' ' + v);
+						if (out.push(prefix + ' ' + uv[i] + ' ' + v))
+							await out.flush();
 					}
 				}
 			}
 		}
 
+		// Look up a remapped index; anything outside the remap (negative or
+		// fractional indices) prints as NaN, as the previous Map lookup did.
+		const remap = (map, idx) => (idx >= 0 && idx < size && Number.isInteger(idx) ? map[idx] : NaN) + 1;
+
 		// Write meshes.
 		for (const mesh of this.meshes) {
-			await writer.writeLine('g ' + mesh.name);
-			await writer.writeLine('s 1');
+			out.push('g ' + mesh.name);
+			out.push('s 1');
 
 			if (mesh.matName)
-				await writer.writeLine('usemtl ' + mesh.matName);
+				out.push('usemtl ' + mesh.matName);
 
 			const triangles = mesh.triangles;
 			const offset = mesh.vertexOffset || 0;
@@ -233,15 +263,17 @@ class OBJWriter {
 				const idxB = triangles[i + 1] + offset;
 				const idxC = triangles[i + 2] + offset;
 
-				const pointA = (vertMap.get(idxA) + 1) + '/' + (hasUV ? uvMap.get(idxA) + 1 : '') + '/' + (normalMap.get(idxA) + 1);
-				const pointB = (vertMap.get(idxB) + 1) + '/' + (hasUV ? uvMap.get(idxB) + 1 : '') + '/' + (normalMap.get(idxB) + 1);
-				const pointC = (vertMap.get(idxC) + 1) + '/' + (hasUV ? uvMap.get(idxC) + 1 : '') + '/' + (normalMap.get(idxC) + 1);
+				const pointA = remap(vertMap, idxA) + '/' + (hasUV ? remap(uvMap, idxA) : '') + '/' + remap(normalMap, idxA);
+				const pointB = remap(vertMap, idxB) + '/' + (hasUV ? remap(uvMap, idxB) : '') + '/' + remap(normalMap, idxB);
+				const pointC = remap(vertMap, idxC) + '/' + (hasUV ? remap(uvMap, idxC) : '') + '/' + remap(normalMap, idxC);
 
-				await writer.writeLine('f ' + pointA + ' ' + pointB + ' ' + pointC);
+				if (out.push('f ' + pointA + ' ' + pointB + ' ' + pointC))
+					await out.flush();
 			}
 		}
 
-		writer.close();
+		await out.flush();
+		await writer.close();
 	}
 }
 

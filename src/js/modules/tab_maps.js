@@ -691,9 +691,14 @@ module.exports = {
 			const export_paths = this.$core.openLastExportStream();
 			const mark_path = path.join('maps', selected_map_dir, selected_map_dir);
 
-			for (const index of export_tiles) {
+			// Tiles export several at a time. Only the texture bake (one shared GL
+			// context) is serialised, inside ADTExporter; geometry, OBJ writing and
+			// placed models of different tiles overlap.
+			const tile_concurrency = Math.min(4, ExportHelper.getConcurrency());
+
+			await generics.queue(export_tiles, async (index) => {
 				if (helper.isCancelled())
-					break;
+					return;
 
 				const adt = new ADTExporter(selected_map_id, selected_map_dir, index);
 
@@ -712,12 +717,15 @@ module.exports = {
 
 				try {
 					const out = await adt.export(dir, export_quality, game_objects, helper);
+					if (out === undefined)
+						return; // cancelled
+
 					await export_paths?.writeLine(out.type + ':' + out.path);
 					helper.mark(mark_path, true);
 				} catch (e) {
 					helper.mark(mark_path, false, e.message, e.stack);
 				}
-			}
+			}, tile_concurrency);
 
 			export_paths?.close();
 			ADTExporter.clearCache();

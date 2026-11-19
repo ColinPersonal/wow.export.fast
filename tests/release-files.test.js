@@ -11,7 +11,7 @@ const ROOT = path.join(__dirname, '..');
 const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'build.json'), 'utf8'));
 
 // Files loaded directly from disk by worker threads.
-const WORKER_FILES = ['src/js/workers/export-worker.js', 'src/js/png-encode.js'];
+const WORKER_FILES = ['src/js/workers/export-worker.js', 'src/js/png-encode.js', 'src/js/casc/blp-decode.js'];
 
 const requiresOf = (file) => {
 	const src = fs.readFileSync(path.join(ROOT, file), 'utf8');

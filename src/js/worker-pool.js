@@ -168,6 +168,20 @@ const encodePNG = async (pixels, width, height, fast) => {
 };
 
 /**
+ * Decode a BLP mipmap and encode it as a PNG on a worker thread. Only the
+ * compressed mipmap data is sent across, not the decoded pixels.
+ * @param {Uint8Array} raw Raw mipmap data (copied, so the caller keeps it).
+ * @param {object} info Decode info, see casc/blp-decode.js decode().
+ * @param {number} mask Channel mask.
+ * @param {boolean} fast PNG fast mode.
+ * @returns {Promise<Buffer>}
+ */
+const encodeBLP = async (raw, info, mask, fast) => {
+	const result = await run({ type: 'blp', raw, info, mask, fast });
+	return Buffer.from(result.data.buffer, result.data.byteOffset, result.data.byteLength);
+};
+
+/**
  * Verify and decompress a BLTE container on a worker thread.
  * The input buffer is transferred to the worker where possible, so the caller
  * must use the returned `raw` buffer in place of the one passed in.
@@ -189,4 +203,4 @@ const decodeBLTE = async (raw, hash) => {
 	return { decoded: null, raw: Buffer.from(result.raw.buffer, result.raw.byteOffset, result.raw.byteLength) };
 };
 
-module.exports = { isAvailable, setEnabled, setScriptPath, encodePNG, decodeBLTE, getPoolSize };
+module.exports = { isAvailable, setEnabled, setScriptPath, encodePNG, encodeBLP, decodeBLTE, getPoolSize };

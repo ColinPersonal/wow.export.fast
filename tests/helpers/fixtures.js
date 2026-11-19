@@ -216,4 +216,90 @@ const decodePNG = (png) => {
 	return { width, height, pixels, filters };
 };
 
-module.exports = { md5, rng, makeImage, makeBLTE, ownedCopy, decodePNG };
+/**
+ * Build a BLP2 file with random mipmap contents.
+ * @param {number} width
+ * @param {number} height
+ * @param {object} [opts]
+ * @param {'dxt1'|'dxt3'|'dxt5'|'bgra'|'palette'} [opts.format='dxt5']
+ * @param {number} [opts.alphaDepth] For palette: 0, 1, 4 or 8.
+ * @param {number} [opts.mipmaps=1] Number of mipmap levels.
+ * @param {number} [opts.seed=1]
+ * @param {boolean} [opts.texture=false] DXT blocks with smooth endpoints
+ *   (compresses like a real texture) instead of random bytes.
+ * @returns {Buffer}
+ */
+const makeBLP = (width, height, opts = {}) => {
+	const format = opts.format ?? 'dxt5';
+	const mipmaps = opts.mipmaps ?? 1;
+	const rand = rng(opts.seed ?? 1);
+
+	let encoding, alphaDepth, alphaEncoding;
+	if (format === 'palette') {
+		encoding = 1; alphaDepth = opts.alphaDepth ?? 8; alphaEncoding = 0;
+	} else if (format === 'bgra') {
+		encoding = 3; alphaDepth = 8; alphaEncoding = 0;
+	} else {
+		encoding = 2;
+		alphaDepth = format === 'dxt1' ? (opts.alphaDepth ?? 0) : 8;
+		alphaEncoding = format === 'dxt5' ? 7 : format === 'dxt3' ? 1 : 0;
+	}
+
+	const mipSize = (w, h) => {
+		if (encoding === 3)
+			return w * h * 4;
+		if (encoding === 1)
+			return w * h + Math.ceil(w * h * alphaDepth / 8);
+		return Math.max(1, Math.ceil(w / 4)) * Math.max(1, Math.ceil(h / 4)) * (format === 'dxt1' ? 8 : 16);
+	};
+
+	const headerSize = 148 + (encoding === 1 ? 1024 : 0);
+	const header = Buffer.alloc(headerSize);
+	header.writeUInt32LE(0x32504c42, 0);
+	header.writeUInt32LE(1, 4);
+	header[8] = encoding;
+	header[9] = alphaDepth;
+	header[10] = alphaEncoding;
+	header[11] = mipmaps > 1 ? 1 : 0;
+	header.writeUInt32LE(width, 12);
+	header.writeUInt32LE(height, 16);
+
+	if (encoding === 1)
+		for (let i = 148; i < headerSize; i++)
+			header[i] = (rand() * 256) | 0;
+
+	const bodies = [];
+	let ofs = headerSize;
+	for (let m = 0; m < mipmaps; m++) {
+		const w = Math.max(1, width >> m);
+		const h = Math.max(1, height >> m);
+		const size = mipSize(w, h);
+		const body = Buffer.alloc(size);
+
+		if (opts.texture && encoding === 2) {
+			const blockBytes = format === 'dxt1' ? 8 : 16;
+			const colourOfs = format === 'dxt1' ? 0 : 8;
+			for (let b = 0; b < size; b += blockBytes) {
+				const t = b / size;
+				if (format !== 'dxt1') {
+					body[b] = 255; body[b + 1] = (200 + rand() * 55) | 0;
+				}
+				body.writeUInt16LE(((t * 31) << 11) | (((1 - t) * 63) << 5) | 12, b + colourOfs);
+				body.writeUInt16LE((((t * 31) | 0) << 11) | 20, b + colourOfs + 2);
+				body.writeUInt32LE(0x1B1B1B1B, b + colourOfs + 4);
+			}
+		} else {
+			for (let i = 0; i < size; i++)
+				body[i] = (rand() * 256) | 0;
+		}
+
+		header.writeUInt32LE(ofs, 20 + m * 4);
+		header.writeUInt32LE(size, 84 + m * 4);
+		bodies.push(body);
+		ofs += size;
+	}
+
+	return Buffer.concat([header, ...bodies]);
+};
+
+module.exports = { md5, rng, makeImage, makeBLTE, ownedCopy, decodePNG, makeBLP };

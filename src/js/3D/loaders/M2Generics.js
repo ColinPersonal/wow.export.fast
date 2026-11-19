@@ -18,6 +18,94 @@ class M2Track {
 	}
 }
 
+// Byte size of each element for the data types read_m2_values() understands.
+const M2_VALUE_SIZES = Object.assign(Object.create(null), { uint32: 4, int16: 2, float3: 12, float4: 16, compquat: 8, uint8: 1 });
+
+/**
+ * Read `count` consecutive elements of `dataType` from the current offset.
+ * Equivalent to reading them one at a time (same values, same array shapes,
+ * same errors at the same element), but scalar types are bulk-read when the
+ * whole run is in bounds.
+ * @param {BufferWrapper} buf
+ * @param {string} dataType
+ * @param {number} count
+ * @param {string} unknownMessage Error prefix thrown for an unknown type (only when count > 0).
+ * @returns {Array}
+ */
+function read_m2_values(buf, dataType, count, unknownMessage) {
+	// Nothing is read (or validated) for an empty run.
+	if (count === 0)
+		return Array(0);
+
+	const size = M2_VALUE_SIZES[dataType];
+	if (size === undefined) {
+		if (count > 0)
+			throw new Error(`${unknownMessage}: ${dataType}`);
+
+		return Array(count);
+	}
+
+	// Fast path: the whole run fits, so a bulk read cannot fail part-way.
+	const inBounds = buf.remainingBytes >= count * size;
+
+	switch (dataType) {
+		case 'uint32':
+			if (inBounds)
+				return buf.readUInt32LE(count);
+			break;
+
+		case 'int16':
+			if (inBounds)
+				return buf.readInt16LE(count);
+			break;
+
+		case 'uint8':
+			if (inBounds)
+				return buf.readUInt8(count);
+			break;
+
+		case 'float3': {
+			const out = Array(count);
+			for (let j = 0; j < count; j++)
+				out[j] = buf.readFloatLE(3);
+			return out;
+		}
+
+		case 'float4': {
+			const out = Array(count);
+			for (let j = 0; j < count; j++)
+				out[j] = buf.readFloatLE(4);
+			return out;
+		}
+
+		case 'compquat': {
+			const out = Array(count);
+			for (let j = 0; j < count; j++) {
+				const q = buf.readUInt16LE(4);
+				q[0] = (q[0] - 32767) / 32768;
+				q[1] = (q[1] - 32767) / 32768;
+				q[2] = (q[2] - 32767) / 32768;
+				q[3] = (q[3] - 32767) / 32768;
+				out[j] = q;
+			}
+			return out;
+		}
+	}
+
+	// Out-of-bounds scalar run: read one at a time so the error matches exactly.
+	const out = Array(count);
+	for (let j = 0; j < count; j++) {
+		if (dataType === 'uint32')
+			out[j] = buf.readUInt32LE();
+		else if (dataType === 'int16')
+			out[j] = buf.readInt16LE();
+		else
+			out[j] = buf.readUInt8();
+	}
+
+	return out;
+}
+
 // See https://wowdev.wiki/M2#Standard_animation_block
 function read_m2_array_array(data, ofs, dataType, useAnims = false, animFiles = new Map(), storeOffsets = false, sequences = null) {
 	const arrCount = data.readUInt32LE();
@@ -46,61 +134,17 @@ function read_m2_array_array(data, ofs, dataType, useAnims = false, animFiles = 
 
 		data.seek(ofs + subArrOfs);
 
-		arr[i] = Array(subArrCount);
-		for (let j = 0; j < subArrCount; j++) {
-			if (useAnims && animFiles.has(i)) {
-				switch (dataType) {
-					case 'uint32':
-						animFiles.get(i).seek(subArrOfs + (j * 4));
-						arr[i][j] = animFiles.get(i).readUInt32LE();
-						break;
-					case 'int16':
-						animFiles.get(i).seek(subArrOfs + (j * 2));
-						arr[i][j] = animFiles.get(i).readInt16LE();
-						break;
-					case 'float3':
-						animFiles.get(i).seek(subArrOfs + (j * 12));
-						arr[i][j] = animFiles.get(i).readFloatLE(3);
-						break;
-					case 'float4':
-						animFiles.get(i).seek(subArrOfs + (j * 16));
-						arr[i][j] = animFiles.get(i).readFloatLE(4);
-						break;
-					case 'compquat':
-						animFiles.get(i).seek(subArrOfs + (j * 8));
-						arr[i][j] = animFiles.get(i).readUInt16LE(4).map(e => (e - 32767) / 32768);
-						break;
-					case 'uint8':
-						animFiles.get(i).seek(subArrOfs + j);
-						arr[i][j] = animFiles.get(i).readUInt8();
-						break;
-					default:
-						throw new Error(`Unhandled data type: ${dataType}`);
-				}
-			} else {
-				switch (dataType) {
-					case 'uint32':
-						arr[i][j] = data.readUInt32LE();
-						break;
-					case 'int16':
-						arr[i][j] = data.readInt16LE();
-						break;
-					case 'float3':
-						arr[i][j] = data.readFloatLE(3);
-						break;
-					case 'float4':
-						arr[i][j] = data.readFloatLE(4);
-						break;
-					case 'compquat':
-						arr[i][j] = data.readUInt16LE(4).map(e => (e - 32767) / 32768);
-						break;
-					case 'uint8':
-						arr[i][j] = data.readUInt8();
-						break;
-					default:
-						throw new Error(`Unknown data type: ${dataType}`);
-				}
-			}
+		if (useAnims && animFiles.has(i)) {
+			const animFile = animFiles.get(i);
+
+			// Values live in the .anim file at subArrOfs. They are contiguous, so
+			// seek once and read sequentially (same positions as seeking per element).
+			if (subArrCount > 0 && M2_VALUE_SIZES[dataType] !== undefined)
+				animFile.seek(subArrOfs);
+
+			arr[i] = read_m2_values(animFile, dataType, subArrCount, 'Unhandled data type');
+		} else {
+			arr[i] = read_m2_values(data, dataType, subArrCount, 'Unknown data type');
 		}
 
 		data.seek(subBase);
@@ -167,43 +211,22 @@ function patch_track_animation(track, animIndex, animBuffer, valueType) {
 	if (tsEnd > animBuffer.byteLength || valEnd > animBuffer.byteLength)
 		return;
 
-	// read timestamps from .anim buffer
-	const timestamps = Array(tsInfo.count);
-	for (let j = 0; j < tsInfo.count; j++) {
-		animBuffer.seek(tsInfo.offset + (j * 4));
-		timestamps[j] = animBuffer.readUInt32LE();
-	}
-	track.timestamps[animIndex] = timestamps;
+	// read timestamps from .anim buffer (contiguous: seek once, read sequentially)
+	if (tsInfo.count > 0)
+		animBuffer.seek(tsInfo.offset);
+
+	track.timestamps[animIndex] = read_m2_values(animBuffer, 'uint32', tsInfo.count);
 
 	// read values from .anim buffer
-	const values = Array(valInfo.count);
-	for (let j = 0; j < valInfo.count; j++) {
-		switch (valueType) {
-			case 'float3':
-				animBuffer.seek(valInfo.offset + (j * 12));
-				values[j] = animBuffer.readFloatLE(3);
-				break;
-			case 'compquat':
-				animBuffer.seek(valInfo.offset + (j * 8));
-				values[j] = animBuffer.readUInt16LE(4).map(e => (e - 32767) / 32768);
-				break;
-			case 'float4':
-				animBuffer.seek(valInfo.offset + (j * 16));
-				values[j] = animBuffer.readFloatLE(4);
-				break;
-			case 'int16':
-				animBuffer.seek(valInfo.offset + (j * 2));
-				values[j] = animBuffer.readInt16LE();
-				break;
-			case 'uint32':
-				animBuffer.seek(valInfo.offset + (j * 4));
-				values[j] = animBuffer.readUInt32LE();
-				break;
-			case 'uint8':
-				animBuffer.seek(valInfo.offset + j);
-				values[j] = animBuffer.readUInt8();
-				break;
-		}
+	let values;
+	if (M2_VALUE_SIZES[valueType] === undefined) {
+		// unknown value type: nothing is read
+		values = Array(valInfo.count);
+	} else {
+		if (valInfo.count > 0)
+			animBuffer.seek(valInfo.offset);
+
+		values = read_m2_values(animBuffer, valueType, valInfo.count);
 	}
 
 	track.values[animIndex] = values;

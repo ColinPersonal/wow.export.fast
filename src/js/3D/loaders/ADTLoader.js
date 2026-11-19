@@ -71,6 +71,9 @@ class ADTLoader {
 	}
 }
 
+// Fully opaque 64x64 alpha layer; copied for layer 0 of every chunk.
+const OPAQUE_ALPHA_LAYER = new Array(64 * 64).fill(255);
+
 const ADTChunkHandlers = {
 	// MVER (Version)
 	0x4D564552: function(data) {
@@ -437,7 +440,7 @@ const TexMCNKChunkHandlers = {
 	0x4D43414C: function(data, chunkSize, root) {
 		const layerCount = this.layers.length;
 		const alphaLayers = this.alphaLayers = new Array(layerCount);
-		alphaLayers[0] = new Array(64 * 64).fill(255);
+		alphaLayers[0] = OPAQUE_ALPHA_LAYER.slice();
 
 		let ofs = 0;
 		for (let i = 1; i < layerCount; i++) {
@@ -452,6 +455,33 @@ const TexMCNKChunkHandlers = {
 
 				let inOfs = 0;
 				let outOfs = 0;
+
+				// Fast path: decode straight from the raw buffer while at least 128 bytes
+				// (the most one run can consume) remain, so no read can go out of bounds.
+				// Anything left over is finished by the per-byte reads below.
+				const start = data.offset;
+				if (start === Math.floor(start)) {
+					const raw = data.raw;
+					const safeEnd = data.byteLength - 128;
+					let p = start;
+
+					while (outOfs < 4096 && p <= safeEnd) {
+						const info = raw[p++];
+						let count = info & 0x7F;
+
+						if (info & 0x80) {
+							const value = raw[p++];
+							while (count-- > 0 && outOfs < 4096)
+								alphaLayer[outOfs++] = value;
+						} else {
+							while (count-- > 0 && outOfs < 4096)
+								alphaLayer[outOfs++] = raw[p++];
+						}
+					}
+
+					inOfs = p - start;
+					data.seek(p);
+				}
 
 				while (outOfs < 4096) {
 					const info = data.readUInt8();

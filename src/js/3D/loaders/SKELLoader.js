@@ -112,41 +112,34 @@ class SKELLoader {
 			const scale = bone.scale.values;
 			const pivot = bone.pivot;
 
+			// (x, y, z) -> (x, z, -y) for translations/rotations, (x, z, y) for scale.
 			for (let i = 0; i < translations.length; i++) {
-				for (let j = 0; j < translations[i].length; j++) {
-					const dx = translations[i][j][0];
-					const dy = translations[i][j][1];
-					const dz = translations[i][j][2];
-
-					translations[i][j][0] = dx;
-					translations[i][j][2] = dy * -1;
-					translations[i][j][1] = dz;
+				const keys = translations[i];
+				for (let j = 0; j < keys.length; j++) {
+					const v = keys[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			for (let i = 0; i < rotations.length; i++) {
-				for (let j = 0; j < rotations[i].length; j++) {
-					const dx = rotations[i][j][0];
-					const dy = rotations[i][j][1];
-					const dz = rotations[i][j][2];
-					const dw = rotations[i][j][3];
-
-					rotations[i][j][0] = dx;
-					rotations[i][j][2] = dy * -1;
-					rotations[i][j][1] = dz;
-					rotations[i][j][3] = dw;
+				const keys = rotations[i];
+				for (let j = 0; j < keys.length; j++) {
+					const v = keys[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			for (let i = 0; i < scale.length; i++) {
-				for (let j = 0; j < scale[i].length; j++) {
-					const dx = scale[i][j][0];
-					const dy = scale[i][j][1];
-					const dz = scale[i][j][2];
-
-					scale[i][j][0] = dx;
-					scale[i][j][2] = dy;
-					scale[i][j][1] = dz;
+				const keys = scale[i];
+				for (let j = 0; j < keys.length; j++) {
+					const v = keys[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy;
 				}
 			}
 
@@ -365,41 +358,30 @@ class SKELLoader {
 			const translations = bone.translation.values[animIndex];
 			if (translations) {
 				for (let j = 0; j < translations.length; j++) {
-					const dx = translations[j][0];
-					const dy = translations[j][1];
-					const dz = translations[j][2];
-
-					translations[j][0] = dx;
-					translations[j][2] = dy * -1;
-					translations[j][1] = dz;
+					const v = translations[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			const rotations = bone.rotation.values[animIndex];
 			if (rotations) {
 				for (let j = 0; j < rotations.length; j++) {
-					const dx = rotations[j][0];
-					const dy = rotations[j][1];
-					const dz = rotations[j][2];
-					const dw = rotations[j][3];
-
-					rotations[j][0] = dx;
-					rotations[j][2] = dy * -1;
-					rotations[j][1] = dz;
-					rotations[j][3] = dw;
+					const v = rotations[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy * -1;
 				}
 			}
 
 			const scale = bone.scale.values[animIndex];
 			if (scale) {
 				for (let j = 0; j < scale.length; j++) {
-					const dx = scale[j][0];
-					const dy = scale[j][1];
-					const dz = scale[j][2];
-
-					scale[j][0] = dx;
-					scale[j][2] = dy;
-					scale[j][1] = dz;
+					const v = scale[j];
+					const dy = v[1];
+					v[1] = v[2];
+					v[2] = dy;
 				}
 			}
 		}

@@ -49,13 +49,18 @@ test('encode is deterministic', () => {
 		assert.ok(pngEncode.encode(pixels, 128, 128, fast).equals(pngEncode.encode(pixels, 128, 128, fast)));
 });
 
-test('fast mode output stays within 2x the adaptive size', () => {
+test('fast mode output stays within 1.3x the adaptive size', () => {
 	// A regression guard, not a target: `npm run bench` reports the actual
-	// size ratio. On the synthetic texture fixture fast mode is ~1.7x larger.
-	for (const kind of ['texture', 'noise', 'flat']) {
+	// size ratio. On the synthetic texture fixture fast mode is ~1.04x larger.
+	for (const kind of ['texture', 'noise']) {
 		const pixels = makeImage(512, 512, kind);
 		const adaptive = pngEncode.encode(pixels, 512, 512, false).length;
 		const fast = pngEncode.encode(pixels, 512, 512, true).length;
-		assert.ok(fast <= adaptive * 2, `${kind}: fast ${fast} bytes vs adaptive ${adaptive} bytes`);
+		assert.ok(fast <= adaptive * 1.3, `${kind}: fast ${fast} bytes vs adaptive ${adaptive} bytes`);
 	}
+
+	// A flat image compresses to almost nothing either way (2 KB vs 6 KB), so
+	// only check it stays small.
+	const flat = pngEncode.encode(makeImage(512, 512, 'flat'), 512, 512, true).length;
+	assert.ok(flat < 16384, `flat: ${flat} bytes`);
 });
