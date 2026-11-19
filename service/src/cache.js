@@ -4,7 +4,7 @@
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const { hashFile, listFiles, isInside, ServiceError } = require('./util');
+const { hashFile, listFiles, isInside, ServiceError, moveDir } = require('./util');
 
 const KEY_RE = /^[0-9a-f]{64}$/;
 
@@ -124,7 +124,7 @@ class ResultCache {
 
 		await fsp.rm(target, { recursive: true, force: true });
 		await fsp.mkdir(target, { recursive: true });
-		await fsp.rename(stagingDir, path.join(target, 'files')).catch(async (e) => {
+		await moveDir(stagingDir, path.join(target, 'files')).catch(async (e) => {
 			// Staging may be empty (nothing written) and never created.
 			if (e.code === 'ENOENT')
 				await fsp.mkdir(path.join(target, 'files'), { recursive: true });
@@ -134,7 +134,7 @@ class ResultCache {
 
 		const tmp = path.join(target, 'manifest.json.tmp');
 		await fsp.writeFile(tmp, JSON.stringify(manifest));
-		await fsp.rename(tmp, path.join(target, 'manifest.json'));
+		await moveDir(tmp, path.join(target, 'manifest.json'));
 
 		this.manifests.set(key, manifest);
 		this.touch(key);

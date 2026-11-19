@@ -269,9 +269,23 @@ const main = async () => {
 
 		const ticker = setInterval(() => process.stdout.write(`\rRunning... ${fmtSec(Date.now() - started)}   `), 1000);
 
+		// The app exits by itself once the report is written. Some builds (the
+		// debug nw.exe) ignore process.exit, so stop it if it lingers.
+		let reportSeen = 0;
+		const lingerCheck = setInterval(() => {
+			if (!reportSeen && fs.existsSync(job.report))
+				reportSeen = Date.now();
+			if (reportSeen && Date.now() - reportSeen > 60000) {
+				console.error('\nThe app wrote its report but did not exit; stopping it.');
+				clearInterval(lingerCheck);
+				child.kill();
+			}
+		}, 2000);
+
 		child.on('exit', (code) => {
 			clearTimeout(timer);
 			clearInterval(ticker);
+			clearInterval(lingerCheck);
 			process.stdout.write('\n');
 			resolve(code);
 		});

@@ -23,16 +23,19 @@ at the end of every phase.
 | Phase | State | Notes |
 |---|---|---|
 | 0 Branch, skeleton, plan | done | plan Revision 2; service/ package |
-| 1 Engine host mode | in progress | Bun engine + service.js ops being built by a fork on branch export-service-engine; openLocal (wowf local + CDN fallback) committed and spiked OK (open 24 s, texture/GLB/raw tile fine) |
+| 1 Engine host mode | done | export-service-engine merged (4b9b86a0): Bun engine over PROTOCOL.md, service ops, heightmap/parse-table moved out of the tabs, PNG bit-depth fix; 201 repo tests, smoke + standard suites pass with the merged tree |
 | 2 Gateway core | done | service/src: auth, cache, jobs, engines, http; 26 tests |
 | 3 MCP layer | done | service/src/tools.js, stateless Streamable HTTP; instructions for agents |
-| 4 Phase-1 exports | pending | waits for the engine branch |
-| 5 Supervision | done (fake engine) | crash/hang/fatal/restart/build-change/quota/eviction: 14 tests; recheck with real engines |
+| 4 Phase-1 exports | done | e2e with real wowf engines (service/test-e2e/run.js): 24/24 on a clean root - search, tables, textures, GLB/OBJ/WMO, CSV, raw files, map raw + OBJ tiles, download script, zip, quick lane under bulk load, 5 concurrent agents |
+| 5 Supervision | done | 43 gateway tests (adds moveDir retry tests) |
 | 6 Startup + tunnel | started | install.ps1 / run-gateway.ps1 written, not registered yet; Tailscale signed in (colinf.tailc80785.ts.net), user enabling HTTPS + Funnel |
 | 7 Phase-2 exports | pending | |
 | 8 Remote QA | pending | |
 | 9 Soak + report | pending | |
 
 ## Open issues
+- Fixed 2026-11-19: committing a result failed with EPERM when another process briefly held a file in staging (seen once on a WMO export). Results now move with retries, then copy-and-delete.
+- Fixed 2026-11-19: the debug nw.exe ignores process.exit after an export-test run, so suites waited 4 h. tests/export-scale/run.js now stops the app 60 s after the report appears.
+- The e2e test ran curl synchronously inside the gateway process and deadlocked; now async.
 - One flaky run of "a running job interrupted by a gateway stop is rerun after restart" (failed in 251 ms once, passed in 7 later runs). Watch for it.
 - archiver 8 pulls minimatch with a moderate DoS advisory (glob amplification); we never pass user input to its glob features.

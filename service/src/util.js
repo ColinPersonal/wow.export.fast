@@ -96,4 +96,29 @@ const listFiles = async (root) => {
 	return out.sort();
 };
 
-module.exports = { canonicalJSON, sortKeys, sha256, newId, hashFile, isInside, ServiceError, sleep, listFiles };
+// Windows refuses to rename a folder while another process (a virus scanner, the
+// search indexer, an engine closing its files) holds a handle inside it. Retry for a
+// few seconds, then copy and delete instead.
+const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY']);
+const moveDir = async (from, to, { attempts = 8, firstDelayMs = 50 } = {}) => {
+	const fsp = require('fs/promises');
+	let delay = firstDelayMs;
+	for (let i = 0; ; i++) {
+		try {
+			return await fsp.rename(from, to);
+		} catch (e) {
+			if (!BUSY.has(e.code))
+				throw e;
+			if (i >= attempts - 1)
+				break;
+			await sleep(delay);
+			delay = Math.min(delay * 2, 1000);
+		}
+	}
+	await fsp.rm(to, { recursive: true, force: true });
+	await fsp.cp(from, to, { recursive: true, errorOnExist: true, force: false });
+	// Best effort: leftover staging folders are removed when the gateway restarts.
+	await fsp.rm(from, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+};
+
+module.exports = { canonicalJSON, sortKeys, sha256, newId, hashFile, isInside, ServiceError, sleep, listFiles, moveDir };
