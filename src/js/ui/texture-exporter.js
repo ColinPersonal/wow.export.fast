@@ -12,7 +12,7 @@ const BLPFile = require('../casc/blp');
 const BufferWrapper = require('../buffer');
 const ExportHelper = require('../casc/export-helper');
 const JSONWriter = require('../3D/writers/JSONWriter');
-const webp = require('webp-wasm');
+const webp = require('../webp');
 
 /**
  * Retrieve the fileDataID and fileName for a given fileDataID or fileName.

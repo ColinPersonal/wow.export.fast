@@ -47,8 +47,18 @@ class FileWriter {
 		this.resolver?.();
 	}
 
+	/**
+	 * Finish writing. The returned promise resolves once everything written
+	 * has been flushed to disk and the file is closed, so callers which need
+	 * the file to be complete should await it. It never rejects.
+	 * @returns {Promise<void>}
+	 */
 	close() {
-		this.stream.end();
+		return new Promise(resolve => {
+			this.stream.once('close', resolve);
+			this.stream.once('error', resolve);
+			this.stream.end();
+		});
 	}
 }
 

@@ -6,7 +6,7 @@
 const BufferWrapper = require('../buffer');
 const PNGWriter = require('../png-writer');
 const perf = require('../perf');
-const webp = require('webp-wasm');
+const webp = require('../webp');
 
 const DXT1 = 0x1;
 const DXT3 = 0x2;

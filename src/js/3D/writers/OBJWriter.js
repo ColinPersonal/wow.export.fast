@@ -241,7 +241,8 @@ class OBJWriter {
 			}
 		}
 
-		writer.close();
+		// Wait for the file to be fully written before reporting it as done.
+		await writer.close();
 	}
 }
 

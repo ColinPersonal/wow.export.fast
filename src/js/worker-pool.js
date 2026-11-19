@@ -60,6 +60,10 @@ const fail = (error) => {
 const dispatch = (worker, task) => {
 	tasks.set(task.id, task);
 	worker.activeTask = task.id;
+
+	// Keep the process alive while a worker has work outstanding. Without a
+	// browser window (headless runs) nothing else may be holding it open.
+	worker.ref();
 	worker.postMessage(task.message, task.transfer);
 };
 
@@ -77,8 +81,12 @@ const spawn = () => {
 		const next = queue.shift();
 		if (next !== undefined)
 			dispatch(worker, next);
-		else
+		else {
 			idle.push(worker);
+
+			// Idle workers must not keep the process alive.
+			worker.unref();
+		}
 
 		if (task === undefined)
 			return;

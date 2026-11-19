@@ -49,6 +49,10 @@ bun ./build.js <BUILD1> <BUILD2> ...
 
 **Note**: The build process will automatically download nw.js headers and handle native add-on compilation if any are present in the `node_addons/` directory.
 
+## Headless Exporter
+
+The export pipeline can run without the desktop application, as a command line tool or an MCP server for AI agents. See [HEADLESS.md](HEADLESS.md).
+
 ## Tests and Benchmarks (Developers Only)
 
 Tests and benchmarks run on plain Node.js (v24+, the same V8 engine NW.js uses), with no extra dependencies and no WoW install needed. They cover the export pipeline pieces that run outside the app: PNG encoding, the export worker pool and its BLTE decoder, the export session (de-duplication and I/O limiting) and the export profiler.

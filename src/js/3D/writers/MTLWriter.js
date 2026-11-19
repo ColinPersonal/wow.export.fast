@@ -64,7 +64,8 @@ class MTLWriter {
 			await writer.writeLine('map_Kd ' + materialFile);
 		}
 
-		writer.close();
+		// Wait for the file to be fully written before reporting it as done.
+		await writer.close();
 	}
 }
 

@@ -79,7 +79,8 @@ class CSVWriter {
 			await writer.writeLine(rowOut.join(';'));
 		}
 
-		writer.close();
+		// Wait for the file to be fully written before reporting it as done.
+		await writer.close();
 	}
 }
 

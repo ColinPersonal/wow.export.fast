@@ -1,0 +1,8 @@
+{
+	"mcpServers": {
+		"wow-export": {
+			"command": "bun",
+			"args": ["src/js/headless/cli.js", "mcp"]
+		}
+	}
+}

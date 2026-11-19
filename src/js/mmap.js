@@ -7,7 +7,47 @@ const path = require('path');
 const log = require('./log');
 const constants = require('./constants');
 
-const mmap_native = require(path.join(constants.INSTALL_PATH, 'mmap.node'));
+const fs = require('fs');
+
+/**
+ * Stand-in for the native add-on's MmapObject which reads the whole file into
+ * memory. Used where the native add-on is not available (headless runs).
+ */
+class BufferedFileObject {
+	constructor() {
+		this.data = null;
+		this.isMapped = false;
+		this.lastError = '';
+	}
+
+	mapFile(file) {
+		try {
+			this.data = fs.readFileSync(file);
+			this.isMapped = true;
+			return true;
+		} catch (e) {
+			this.lastError = e.message;
+			return false;
+		}
+	}
+
+	unmap() {
+		this.data = null;
+		this.isMapped = false;
+	}
+}
+
+let mmap_native;
+try {
+	mmap_native = require(path.join(constants.INSTALL_PATH, 'mmap.node'));
+} catch (e) {
+	// Only fall back when running outside the packaged application; inside
+	// it, a missing add-on is a broken install and should fail loudly.
+	if (!globalThis.WOW_EXPORT_HEADLESS)
+		throw e;
+
+	mmap_native = { MmapObject: BufferedFileObject };
+}
 
 const virtual_files = new Set();
 
