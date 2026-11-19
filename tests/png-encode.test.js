@@ -64,3 +64,86 @@ test('fast mode output stays within 1.3x the adaptive size', () => {
 	const flat = pngEncode.encode(makeImage(512, 512, 'flat'), 512, 512, true).length;
 	assert.ok(flat < 16384, `flat: ${flat} bytes`);
 });
+
+// --- other pixel formats (heightmaps) ----------------------------------------
+
+const zlibNode = require('zlib');
+
+/** Decode a non-interlaced PNG of any byte-aligned format to its raw bytes. */
+const decodeRaw = (png) => {
+	let ofs = 8, ihdr = null;
+	const idat = [];
+	while (ofs < png.length) {
+		const length = png.readUInt32BE(ofs);
+		const type = png.toString('latin1', ofs + 4, ofs + 8);
+		const body = png.subarray(ofs + 8, ofs + 8 + length);
+		if (type === 'IHDR')
+			ihdr = { width: body.readUInt32BE(0), height: body.readUInt32BE(4), bitDepth: body[8], colorType: body[9] };
+		else if (type === 'IDAT')
+			idat.push(body);
+		ofs += 12 + length;
+	}
+
+	const bpp = { 0: 1, 2: 3, 4: 2, 6: 4 }[ihdr.colorType] * ihdr.bitDepth / 8;
+	const stride = ihdr.width * bpp;
+	const raw = zlibNode.inflateSync(Buffer.concat(idat));
+	const out = Buffer.alloc(stride * ihdr.height);
+
+	for (let y = 0; y < ihdr.height; y++) {
+		const filterType = raw[y * (stride + 1)];
+		for (let x = 0; x < stride; x++) {
+			const v = raw[y * (stride + 1) + 1 + x];
+			const a = x >= bpp ? out[y * stride + x - bpp] : 0;
+			const b = y > 0 ? out[(y - 1) * stride + x] : 0;
+			const c = x >= bpp && y > 0 ? out[(y - 1) * stride + x - bpp] : 0;
+			let p;
+			switch (filterType) {
+				case 0: p = 0; break;
+				case 1: p = a; break;
+				case 2: p = b; break;
+				case 3: p = (a + b) >> 1; break;
+				case 4: { const pa = Math.abs(b - c), pb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c); p = pa <= pb && pa <= pc ? a : pb <= pc ? b : c; break; }
+				default: throw new Error('bad filter ' + filterType);
+			}
+			out[y * stride + x] = (v + p) & 0xFF;
+		}
+	}
+
+	return { ihdr, pixels: out };
+};
+
+for (const fast of [false, true]) {
+	for (const [bytesPerPixel, bitDepth] of [[1, 8], [2, 16]]) {
+		test(`${fast ? 'fast' : 'adaptive'} encode writes ${bitDepth}-bit greyscale (heightmaps)`, () => {
+			const w = 37, h = 19;
+			// PNGWriter allocates 4 bytes per pixel whatever the format; only the start is used.
+			const data = Buffer.alloc(w * h * 4, 0xEE);
+			for (let i = 0; i < w * h * bytesPerPixel; i++)
+				data[i] = (i * 7 + (i >> 3)) & 0xFF;
+
+			const png = pngEncode.encode(data, w, h, fast, { bytesPerPixel, bitDepth, colorType: 0 });
+			const { ihdr, pixels } = decodeRaw(png);
+
+			assert.deepEqual(ihdr, { width: w, height: h, bitDepth, colorType: 0 });
+			assert.ok(pixels.equals(data.subarray(0, w * h * bytesPerPixel)), 'greyscale pixels differ');
+		});
+	}
+}
+
+test('PNGWriter honours bitDepth and colorType set by heightmap export', () => {
+	const PNGWriter = require('../src/js/png-writer');
+	const writer = new PNGWriter(4, 2);
+	writer.bytesPerPixel = 2;
+	writer.bitDepth = 16;
+	writer.colorType = 0;
+	writer.getPixelData().fill(0x12, 0, 16);
+
+	const { ihdr, pixels } = decodeRaw(writer.getBuffer().raw);
+	assert.equal(ihdr.bitDepth, 16);
+	assert.equal(ihdr.colorType, 0);
+	assert.ok(pixels.equals(Buffer.alloc(16, 0x12)));
+
+	// The default stays 8-bit RGBA.
+	const rgba = new PNGWriter(2, 2);
+	assert.equal(decodePNG(rgba.getBuffer().raw).width, 2);
+});
