@@ -86,6 +86,14 @@ class BuildCache {
 			}
 
 			const data = await BufferWrapper.readFile(filePath);
+
+			// Empty entries were written by an older version (see storeFile);
+			// they are never valid, so fetch the file again.
+			if (data.byteLength === 0) {
+				log.write('Empty cache file, rejecting cache (%s)', filePath);
+				return null;
+			}
+
 			const dataHash = data.calculateHash('sha1', 'hex');
 
 			// Reject cache if hash does not match.
@@ -119,6 +127,14 @@ class BuildCache {
 		if (!(data instanceof BufferWrapper))
 			throw new Error('Data provided to cache.storeFile() must be of BufferWrapper type.');
 
+		// Take a copy before the first await. Callers don't wait for this, and
+		// may hand the same buffer to a worker thread (transferring it leaves
+		// it empty here), which used to store empty files that then passed
+		// their own integrity check on every later read.
+		const raw = Buffer.from(data.raw);
+		if (raw.byteLength === 0)
+			return;
+
 		const filePath = this.getFilePath(file, dir);
 		if (dir)
 			await generics.createDirectory(path.dirname(filePath));
@@ -128,11 +144,11 @@ class BuildCache {
 			await cacheIntegrityReady();
 
 		// Integrity checking.
-		const hash = data.calculateHash('sha1', 'hex');
+		const hash = new BufferWrapper(raw).calculateHash('sha1', 'hex');
 		cacheIntegrity[filePath] = hash;
 
-		await fsp.writeFile(filePath, data.raw);
-		core.view.cacheSize += data.byteLength;
+		await fsp.writeFile(filePath, raw);
+		core.view.cacheSize += raw.byteLength;
 
 		await this.saveCacheIntegrity();
 	}
