@@ -67,6 +67,13 @@ class Engine extends EventEmitter {
 		if (this.state === 'ready')
 			return Promise.resolve(this);
 
+		if (this.pool.closing)
+			return Promise.reject(new ServiceError('ENGINE_UNAVAILABLE', 'The service is shutting down', { retryable: true }));
+
+		// Recently failed to open its game data: report that rather than wait.
+		if (this.state === 'failed' && this.error?.code === 'SOURCE_UNAVAILABLE' && this.failures > 0)
+			return Promise.reject(new ServiceError('SOURCE_UNAVAILABLE', this.error.message, { retryable: true, hint: 'The game data for ' + this.product + ' could not be opened; check service_status.' }));
+
 		if (this.state === 'stopped' || (this.state === 'failed' && !this.restartTimer))
 			this.start();
 
@@ -83,7 +90,7 @@ class Engine extends EventEmitter {
 	}
 
 	start() {
-		if (this.proc !== null)
+		if (this.proc !== null || this.pool.closing)
 			return;
 
 		clearTimeout(this.restartTimer);
@@ -161,8 +168,16 @@ class Engine extends EventEmitter {
 	}
 
 	onMessage(msg) {
-		this.armWatchdog();
+		try {
+			this.handleMessage(msg);
+		} finally {
+			// Re-arm after handling, so a "ready" message gets the short limit.
+			if (this.proc !== null)
+				this.armWatchdog();
+		}
+	}
 
+	handleMessage(msg) {
 		switch (msg.t) {
 			case 'ready':
 				this.state = 'ready';
@@ -175,10 +190,15 @@ class Engine extends EventEmitter {
 				this.emit('ready', this);
 				break;
 
-			case 'fatal':
+			case 'fatal': {
 				this.error = msg.error ?? { code: 'SOURCE_UNAVAILABLE', message: 'Engine failed' };
 				this.log.warn('engine %s fatal: %s', this.id, this.error.message);
+				// Callers waiting for this engine learn why straight away.
+				const err = new ServiceError(this.error.code ?? 'SOURCE_UNAVAILABLE', this.error.message, { retryable: true, hint: 'The game data for ' + this.product + ' could not be opened; check service_status.' });
+				for (const w of this.readyWaiters.splice(0))
+					w.reject(err);
 				break;
+			}
 
 			case 'heartbeat':
 				this.stats = { rss: msg.rss ?? 0, heapUsed: msg.heapUsed ?? 0 };

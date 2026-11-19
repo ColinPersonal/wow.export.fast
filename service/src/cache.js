@@ -155,7 +155,9 @@ class ResultCache {
 			throw new ServiceError('NOT_FOUND', 'Unknown file', { status: 404 });
 
 		// Only paths listed in the manifest can be served.
-		const entry = manifest.files.find(f => f.path === rel);
+		if (manifest._index === undefined)
+			Object.defineProperty(manifest, '_index', { value: new Map(manifest.files.map(f => [f.path, f])), enumerable: false });
+		const entry = manifest._index.get(rel);
 		if (entry === undefined)
 			throw new ServiceError('NOT_FOUND', 'Unknown file', { status: 404 });
 

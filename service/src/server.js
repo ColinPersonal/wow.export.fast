@@ -42,8 +42,9 @@ const start = async (options = {}) => {
 		const pid = Number(fs.readFileSync(lockFile, 'utf8')) || 0;
 		let alive = false;
 		try {
+			// A lock held by this very process means another gateway instance here.
 			process.kill(pid, 0);
-			alive = pid !== process.pid;
+			alive = true;
 		} catch {
 			// stale lock
 		}
