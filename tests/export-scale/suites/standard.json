@@ -1,0 +1,14 @@
+{
+	"description": "A 4x4 block of Elwynn Forest (16 tiles) in each format, with placed models, WMOs and foliage.",
+	"config": {
+		"mapsIncludeM2": true,
+		"mapsIncludeWMO": true,
+		"mapsIncludeFoliage": true,
+		"mapsIncludeLiquid": true
+	},
+	"jobs": [
+		{ "name": "obj-baked", "map": "azeroth", "format": "OBJ", "quality": 1024, "tiles": { "from": "31_47", "to": "34_50" } },
+		{ "name": "obj-alphamaps", "map": "azeroth", "format": "OBJ", "quality": -1, "tiles": { "from": "31_47", "to": "34_50" } },
+		{ "name": "raw", "map": "azeroth", "format": "RAW", "tiles": { "from": "31_47", "to": "34_50" } }
+	]
+}
