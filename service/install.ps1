@@ -16,7 +16,11 @@ $Runner = Join-Path $Here 'run-gateway.ps1'
 $Startup = [Environment]::GetFolderPath('Startup')
 $Shortcut = Join-Path $Startup 'wow-export-service.lnk'
 $PowerShell = (Get-Command powershell.exe).Source
-$Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Runner`""
+# Run inside a headless conhost. Started directly, the runner gets whatever the default
+# terminal is (Windows Terminal on Windows 11), and closing that window sends a close
+# event that kills the runner, the gateway and the engines together (exit 0xC000013A).
+$Launcher = Join-Path $env:SystemRoot 'System32\conhost.exe'
+$Arguments = "--headless `"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$Runner`""
 
 if ($Remove) {
 	Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -26,7 +30,7 @@ if ($Remove) {
 }
 
 try {
-	$action = New-ScheduledTaskAction -Execute $PowerShell -Argument $Arguments -WorkingDirectory $Here
+	$action = New-ScheduledTaskAction -Execute $Launcher -Argument $Arguments -WorkingDirectory $Here
 	$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 	$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 	$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
@@ -37,7 +41,7 @@ try {
 	Write-Output "Scheduled task not available ($($_.Exception.Message)); using a Startup folder shortcut."
 	$shell = New-Object -ComObject WScript.Shell
 	$link = $shell.CreateShortcut($Shortcut)
-	$link.TargetPath = $PowerShell
+	$link.TargetPath = $Launcher
 	$link.Arguments = $Arguments
 	$link.WorkingDirectory = $Here
 	$link.WindowStyle = 7
